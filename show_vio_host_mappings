@@ -1,0 +1,455 @@
+#!/usr/bin/perl
+#
+# Shows virtual controller (vhost and vfchost) mappings in a VIOS environment
+#
+# Armin Kunaschik
+# Version 1.0 initial release
+# Version 1.1 added WWPN of VIO HBA (because SAN guys requested it)
+# Version 1.2 removed unnecessary loop that caused bad performance
+# Version 1.3 2015-04-30 cosmetic changes, slot numbers are left justified now, ioscli APAR mentioned
+# Version 1.4 2020-11-07 added code to read luninfo.cfg, currently not used
+#
+# Bugs: Script might display garbage for LPAR and/or LPARID when executed while a lpar is booting
+#       there is no documentation on all possible kdb output :-(
+#
+# Workaround: Don't execute while lpars are booting :-)
+#
+
+use strict;
+#use warnings;
+use Getopt::Long;
+use XML::Simple; # for config file
+#use Data::Dumper;
+
+my $cfgfile="/etc/luninfo.cfg";
+my $cfg; #configuration hash
+
+my %options = ( 'disks' => 0,
+        'noheader' => 0,
+        'help' => 0
+);
+
+sub usage {
+        print STDERR "Usage: $0 [-h] | [-H ] | [ -d ]\n";
+        print STDERR "          display vhost to LPAR mapping\n";
+        print STDERR "  -h      display this help\n";
+        print STDERR "  -d      display vhost to LPAR mapping with mapped disks and vtds (vscsi only)\n";
+        print STDERR "  -H      don't display header line\n";
+        exit 1;
+
+}
+
+Getopt::Long::Configure ("bundling");   # enable bundling of options like -lp same as -l -p
+GetOptions( "d"     => \$options{'disks'},
+            "H"     => \$options{'noheader'},
+            "h"     => \$options{'help'},
+        ) or usage;
+
+# any option list containing -h will display usage
+if ( $options{'help'} ) { usage; };
+
+my %locations;
+
+if ( -e $cfgfile ) {
+	$cfg=XMLin($cfgfile, ForceArray => 1);
+}
+
+foreach my $location ( keys %{$cfg->{'location'}} ) {
+	foreach my $element ( keys %{$cfg->{'location'}->{$location}} ) {
+		for ( $element) {
+			if ( /storage/ ) {
+				foreach my $box ( keys %{$cfg->{'location'}->{$location}->{$element}} ) {
+					if ( defined $locations{$box} ) {
+						print STDERR "ERROR in $cfgfile: Duplicate use of storage serial $box! Using first definition.\n";
+						next;
+					}
+					$locations{$box}=$location;
+				}
+			}
+		}
+	}
+}
+
+#print Data::Dumper->Dump([\%locations]);
+
+# hashes for vscsi, vfc and physical FC adapters
+my %vscsi;
+my %vfc;
+my %adapters;
+# disks hash holds hdisk-vtd mappings and other storage info (location, box, uuid etc)
+my %disks;
+
+# get list of virtual adapters, status and physical locations
+open(CMD,"/usr/sbin/lsdev -c adapter -t IBM,v-scsi-host -F'name status physloc'|") or die "Error running lsdev -c adapter -t IBM,v-scsi-host -F'name status physloc'!";
+while(<CMD>) {
+	chomp;
+	my ($name, $status, $physloc)=split;
+	$vscsi{$name}->{"name"}=$name;
+	$vscsi{$name}->{"status"}=$status;
+	$vscsi{$name}->{"type"}='v-scsi-host';
+	$vscsi{$name}->{"physloc"}=$physloc;
+        if ( $physloc =~ /[^-]+\-V[0-9]+\-(C[0-9]+)/ ) {
+                $vscsi{$name}->{"slot"}=$1;
+        }
+
+}
+
+open(CMD,"/usr/sbin/lsdev -c adapter -t IBM,vfc-server -F'name status physloc'|") or die "Error running lsdev -c adapter -t IBM,vfc-server -F'name status physloc'!";
+while(<CMD>) {
+	chomp;
+	my ($name, $status, $physloc)=split;
+	$vfc{$name}->{"name"}=$name;
+	$vfc{$name}->{"status"}=$status;
+	$vfc{$name}->{"type"}='vfc-server';
+	$vfc{$name}->{"physloc"}=$physloc;
+        if ( $physloc =~ /[^-]+\-V[0-9]+\-(C[0-9]+)/ ) {
+                $vfc{$name}->{"slot"}=$1;
+        }
+
+}
+
+open(CMD,'/usr/sbin/lsdev -Cc adapter -F name:status:type|') or die "Error running /usr/sbin/lsdev -Cc adapter -F name:status:type !\n";
+while (<CMD>) {
+	chomp;
+	next if ! /^fcs/; # only physical fcs adapters, more to include here?
+	my ($adapter,$status,$type)=split(/:/);
+	$adapters{$adapter}->{'status'}=$status;
+	$adapters{$adapter}->{'name'}=$adapter;
+	$adapters{$adapter}->{'type'}=$type;
+	if ( $adapter =~ /^fcs/ ) {
+		open(CMD1,"/usr/sbin/lscfg -vl $adapter|") or die "Error running /usr/sbin/lscfg -vl $adapter !\n";
+		while(<CMD1>) {
+			# get WWPN of physical adapter, easy way, lscfg works only for physical adapters
+			if ( /\s+Network Address\.+\s*(\S+)/ )            { $adapters{$adapter}->{'wwpn'}=$1; }
+		}
+		close(CMD1);
+	}
+}
+close(CMD);
+
+# get mapped adapter name like this:
+# lsattr -El vfchost0 -a map_port
+# map_port fcs1 Physical FC Port False
+
+# BEWARE: the man page states, that the field order is not always followed in the output!
+# ioscli lsmap -all -npiv -fmt , -field name clntname status fc clntid physloc vfcclient vfcclientdrc
+# vfchost0,server1,52,U9117.MMC.0601234-V6-C11,LOGGED_IN,fcs1,fcs3,U9117.MMC.0601234-V52-C17
+# vfchost1,server1,52,U9117.MMC.0601234-V6-C10,LOGGED_IN,fcs2,fcs2,U9117.MMC.0601234-V52-C16
+# vfchost0, ,27,U9117.MMC.0601234-V3-C10,NOT_LOGGED_IN,fcs0, , 
+# in the future, IV72745 might fix some of this... no, it didn't.
+# Wow! IV86769 did not fix lsmap -fmt but added a new option -fmt2... just for me(!), and it took only a few years
+# TODO: Change code to use -fmt2 when there is no VIOS 2 anymore
+
+open(CMD,"cd /tmp; /usr/ios/cli/ioscli lsmap -all -npiv -fmt , -field name clntname status fc clntid physloc vfcclient vfcclientdrc|") or die "Error running ioscli command\n";
+# cd /tmp because ioscli generates ioscli.log in current work directory
+while(<CMD>) {
+	chomp;
+	my ( $vhost, $lpar_name, $lpar_number, $vio_hw_path, $san_status, $vio_adapter, $lpar_adapter, $lpar_hw_path)=split(/,/);
+	$lpar_name =~ s/^\s+|\s+$//g; # trim spaces; f*ck IBM (empty entries are no empty strings but " " grrrr), IV86769 adds -fmt2, no trimming anymore
+	$lpar_adapter =~ s/^\s+|\s+$//g; # trim more spaces; same reason
+	$lpar_hw_path =~ s/^\s+|\s+$//g; # still triming
+	$vfc{$vhost}->{'lpar_name'}=$lpar_name;
+	$vfc{$vhost}->{'lpar_number'}=$lpar_number;
+	$vfc{$vhost}->{'vio_adapter'}=$vio_adapter;
+	$vfc{$vhost}->{'lpar_adapter'}=$lpar_adapter;
+	$vfc{$vhost}->{'san_status'}=$san_status;
+	$vfc{$vhost}->{'lpar_hw_path'}=$lpar_hw_path;
+	if ( $lpar_hw_path =~ /[^-]+\-V[0-9]+\-(C[0-9]+)/ ) {
+		$vfc{$vhost}->{"lpar_slot"}=$1;
+	}
+}
+
+# get vhost to lpar mapping from kernel kdb... this takes some time! :-)
+# kdb queries are slow. let's query some info with the same kdb call (in "parallel"), 15 seems OK, 20 is NOT
+# looking for 2 lines:
+#         Target vSCSI Adapter Structure vhost0
+# client_data.srp_version: 16.aviosserver1      client_data.partition_name: server1
+# client_data.partition_number: A
+my $parallel_kdb_queries=15; # 15 queries in 1 kdb call. Reduce if you see errors or missing lpar names
+my $kdb_count=0;
+my $number_of_vhosts= scalar(keys %vscsi);
+my $initial_kdb_command= "svCmdIni; svPrQs; ";
+my $kdb_command=$initial_kdb_command;
+
+foreach my $vhost ( keys %vscsi ) {
+	$kdb_count++; $number_of_vhosts--;
+	$kdb_command .= "svva $vhost; ";
+	if ( $kdb_count == $parallel_kdb_queries || $number_of_vhosts == 0 ) {
+		my $vhost_name=""; my $lpar_name=""; my $lpar_number="";
+		open(CMD,"echo \"$kdb_command\" \|/usr/sbin/kdb -script|" ) or die "Error running /usr/sbin/kdb -script !\n";
+		while(<CMD>) {
+			if ( m/\s+Target vSCSI Adapter Structure\s+(\S+)\b/ ) {
+				$vhost_name=$1;
+			}
+			if ( m/client_data.srp_version:\s+\S+\s+client_data.partition_name:\s+(\S+)\b/ ) {
+				$lpar_name=$1; # lpar_name is only set correctly when LPAR is running
+				# when lpar is down, the old name before shutdown is used
+				# when lpar was never active, name is empty. Same applies to defined adapters that made available
+			}
+			if ( m/client_data.srp_version:\s+client_data.partition_name:\s+$/ ) {
+				$lpar_name='none'; # special case of empty vhost
+			}
+			if ( m/client_data.partition_number:\s+([\da-fA-F]+)\b/ ) {
+				$lpar_number=$1; # 0 means "any partition" -> vhost is empty
+				# this reflects HMC profile values (partition id).
+			}
+			if ( $lpar_name ne "" && $vhost_name ne "" && $lpar_number ne "" ) {
+				$vscsi{$vhost_name}->{"lpar_name"}=$lpar_name;
+				$vscsi{$vhost_name}->{"lpar_number"}=hex($lpar_number);
+				$vhost_name=""; $lpar_name=""; $lpar_number=""; #prevent leftover from earlier values
+			}
+		}
+		close(CMD);
+		$kdb_count=0; $kdb_command=$initial_kdb_command;
+	}
+}
+
+# subroutine to sort the disks numerically rather than alphabetically
+sub device_numerically {
+	$a=~ /\D+(\d+)/;
+	my $aa=$1;
+	$b=~ /\D+(\d+)/;
+	my $bb=$1;
+	$aa <=> $bb;
+}
+
+#print Data::Dumper->Dump([\%vscsi]);
+#print Data::Dumper->Dump([\%vfc]);
+
+# read the disk types and availability
+open(CMD,"/usr/sbin/lsdev -c disk -F'name subclass type status'|") or die "Error running lsdev -c disk -F'name subclass type'!";
+while(<CMD>) {
+	chomp;
+	if ( m/(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/ ) {
+		$disks{$1}->{'name'}=$1;
+		$disks{$1}->{'subclass'}=$2;
+		$disks{$1}->{'type'}=$3;
+		$disks{$1}->{'status'}=$4;
+	}
+}
+close(CMD);
+
+# get VTD to disk name mapping from ODM
+my @vtd_list;
+{
+	local $/="\n\n"; # record delimiter is 2 new lines = paragraph
+	@vtd_list=qx { /usr/bin/odmget -q "attribute=aix_tdev" CuAt };
+}
+#CuAt:
+#        name = "server1_dc1_lun1"
+#        attribute = "aix_tdev"
+#        value = "hdisk459"
+#        type = "R"
+#        generic = "D"
+#        rep = "s"
+#        nls_index = 5
+
+foreach my $vtd ( @vtd_list ) {
+	my $vtd_name="";
+	my $vtd_disk="";
+	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
+	if ( $vtd =~ m/\s+value\s+=\s+"(\S+)"/m ) { $vtd_disk = $1; }
+	if ( $vtd_disk ne "" && $vtd_name ne "" ) {
+		$disks{$vtd_disk}->{'vtd'}=$vtd_name;
+	}
+}
+undef @vtd_list;
+#print Data::Dumper->Dump([\%disks]);
+
+# get VTD to vhost mapping from ODM
+my @vtd_vhost_list;
+{
+	local $/="\n\n";
+	@vtd_vhost_list=qx { /usr/bin/odmget -q PdDvLn="virtual_target/vtdev/scdisk" CuDv };
+}
+#CuDv:
+#        name = "server1_dc1_lun1"
+#        status = 1
+#        chgstatus = 0
+#        ddins = ""
+#        location = ""
+#        parent = "vhost50"
+#        connwhere = "5"
+#        PdDvLn = "virtual_target/vtdev/scdisk"
+foreach my $vtd ( @vtd_vhost_list ) {
+	my $vtd_name="";
+	my $vtd_parent="";
+	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
+	if ( $vtd =~ m/\s+parent\s+=\s+"(\S+)"/m ) { $vtd_parent = $1; }
+	if ( $vtd_parent ne "" && $vtd_name ne "" ) {
+		foreach my $disk ( keys %disks ) {
+			if ( defined $disks{$disk}->{'vtd'} && $disks{$disk}->{'vtd'} eq $vtd_name ) {
+				$disks{$disk}->{'vhost'}=$vtd_parent;
+				$vscsi{$vtd_parent}->{'disks'}->{$disk}=$vtd_name;
+				last;
+			}
+		}
+	}
+}
+undef @vtd_vhost_list;
+
+# get all unique_id from ODM if there is a matching disk
+my @uuid_list;
+{
+	local $/="\n\n";
+	@uuid_list=qx { /usr/bin/odmget -q "attribute=unique_id" CuAt };
+}
+foreach my $uuid ( @uuid_list ) {
+	my $unique_id="";
+	my $name="";
+	if ( $uuid =~ m/\s+name\s+=\s+"(\S+)"/m ) { $name=$1; }
+	if ( $uuid =~ m/\s+value\s+=\s+"(\S+)"/m ) { $unique_id=$1; }
+	if ( $name ne "" && $unique_id ne "" && defined $disks{$name} ) {
+		$disks{$name}->{'unique_id'}=$unique_id;
+	}
+}
+undef @uuid_list;
+
+#print Data::Dumper->Dump([\%disks]);
+#print Data::Dumper->Dump([\%vscsi]);
+
+# copy & paste from luninfo, few lines removed (like lun_id and scsi_id stuff)
+foreach my $disk ( keys %disks ) {
+	# use type and subclass to separate disks
+	for ($disks{$disk}{'type'}) {
+		#2105    - 2105 models (ESS)
+		#2145    - 2145 models (SVC)
+		#2147    - 2147 models (SVC)
+		#1750    - 1750 devices (DS 6000)
+		#2107    - 2107 devices (DS 8000)
+		#1724    - 1724 devices (DS 4100)
+		#1814    - 1814 devices (DS 4200 and DS 4700)
+		#1722    - 1722 devices (DS 4300)
+		#1742    - 1742 devices (DS 4400 and DS 4500)
+		#1815    - 1815 devices (DS 4800)
+		#1818    - 1818 devices (DS 5000)
+
+		if (/2145/) {
+			# 3321360050768019081CFD800000000000A8404214503IBMfcp
+			# IBM storage WWN always start with 6005076
+			if ( $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+				$disks{$disk}->{'guid'}=$1;
+				$disks{$disk}->{'box'}=$2;
+				$disks{$disk}->{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2145";
+			}
+		}
+		elsif (/2107/) {
+			# 200B75G6831015607210790003IBMfcp
+			if ( $disks{$disk}->{'unique_id'} =~ m/^....(.......)((..)(..))..2107.....IBMfcp/ ) {
+				$disks{$disk}{'box'}=$1;
+				$disks{$disk}{'guid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
+				#undef $disks{$name}; # we don't care about 2107 disks
+				$disks{$disk}{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2107";
+			}
+		}
+		elsif (/vdisk/) {
+
+			if ( $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
+				$disks{$disk}{'guid'}=$1;
+				$disks{$disk}{'box'}=$2;
+				$disks{$disk}{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2145";
+			}
+			# 3520200B75CF371014A07210790003IBMfcp05VDASD03AIXvscsi"
+			elsif ( $disks{$disk}->{'unique_id'} =~ m/........(.......)((..)(..))..2107.....IBMfcp..VDASD..AIXvscsi/ ) {
+				$disks{$disk}{'box'}=$1;
+				$disks{$disk}{'guid'}="$1_$2";
+				$disks{$disk}{'suid'}="$3:$4";
+				#undef $disks{$disk}; # we don't care about 2107 disks
+			}
+		
+		}
+		elsif (/scsd/) { # parallel or serial SCSI disk (subclass would be scsi and sas)
+			delete $disks{$disk}; # we are not interested in those -> remove from hash
+		} else {
+			print STDERR "Unknown disk type $disks{$disk}{'type'} for disk $disk found!\n";
+			undef $disks{$disk};
+		}
+	}
+}
+
+#print Data::Dumper->Dump([\%disks]);
+
+# Output
+# -d
+if ( $options{'disks'} ) {
+
+	if ( ! $options{'noheader'} ) { # option -H
+		printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-7s %-5s\n",
+			"#ADAPTER","STATE","SLOT","LPARID","LPAR","HDISK","VTD","LOC","BOX","UID");
+	}
+	# only vscsi vhosts have luns associated
+	foreach my $vhost (sort device_numerically keys %vscsi) {
+		# do we have disks connected to this vhost?
+		if ( scalar ( keys %{$vscsi{$vhost}->{'disks'}}) != 0 ) {
+			foreach my $disk ( keys %{$vscsi{$vhost}->{'disks'}} ) {
+				printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-7s %-5s\n",
+					$vscsi{$vhost}->{'name'},
+					$vscsi{$vhost}->{'status'},
+					$vscsi{$vhost}->{'slot'},
+					defined $vscsi{$vhost}->{'lpar_number'} ? $vscsi{$vhost}->{'lpar_number'} : "-",
+					defined $vscsi{$vhost}->{'lpar_name'} ? $vscsi{$vhost}->{'lpar_name'} : "-",
+					$disk,
+					$vscsi{$vhost}->{'disks'}->{$disk},
+					defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "UNKN",
+					defined $disks{$disk}->{'box'} ? $disks{$disk}->{'box'} : "UNKN",
+					defined $disks{$disk}->{'suid'} ? $disks{$disk}->{'suid'} : "-"
+				);
+			}
+		} else { # empty vhost
+			printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-7s %-5s\n",
+					$vscsi{$vhost}->{'name'},
+					$vscsi{$vhost}->{'status'},
+					$vscsi{$vhost}->{'slot'},
+					defined $vscsi{$vhost}->{'lpar_number'} ? $vscsi{$vhost}->{'lpar_number'} : "-",
+					defined $vscsi{$vhost}->{'lpar_name'} ? $vscsi{$vhost}->{'lpar_name'} : "-",
+					'none',
+					'none',
+					'-',
+					'-',
+					'-'
+			);
+		}
+	}
+} else {
+# no option
+
+	if ( ! $options{'noheader'} ) { # option -H
+		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %14s\n",
+		"#ADAPTER","STATE","SLOT","HBA","WWPN","LPARID","LPAR","LHBA","VSLOT","SAN");
+	}
+	# vscsi goes first, some fields are not available -> "-"
+	foreach my $vhost (sort device_numerically keys %vscsi) {
+		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %14s\n",
+			$vscsi{$vhost}->{'name'},
+			$vscsi{$vhost}->{'status'},
+			$vscsi{$vhost}->{'slot'},
+			"-",
+			"-",
+			$vscsi{$vhost}->{'lpar_number'},
+			$vscsi{$vhost}->{'lpar_name'},
+			"-",
+			"-",
+			"-"
+		);
+	}
+	foreach my $vhost (sort device_numerically keys %vfc) {
+		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %14s\n",
+			$vfc{$vhost}->{'name'},
+			$vfc{$vhost}->{'status'},
+			$vfc{$vhost}->{'slot'},
+			$vfc{$vhost}->{'vio_adapter'},
+			defined $adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} ? $adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} : "-",
+			$vfc{$vhost}->{'lpar_number'},
+			( defined $vfc{$vhost}->{'lpar_name'} && $vfc{$vhost}->{'lpar_name'} ne "" ) ? $vfc{$vhost}->{'lpar_name'} : "-",
+			( defined $vfc{$vhost}->{'lpar_adapter'} && $vfc{$vhost}->{'lpar_adapter'} ne "" ) ? $vfc{$vhost}->{'lpar_adapter'} : "-",
+			( defined $vfc{$vhost}->{'lpar_slot'} && $vfc{$vhost}->{'lpar_slot'} ne "" ) ? $vfc{$vhost}->{'lpar_slot'} : "-",
+			$vfc{$vhost}->{'san_status'}
+		);
+	
+	}
+}
+
+# The end.

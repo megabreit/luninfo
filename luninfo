@@ -1,0 +1,1475 @@
+#!/usr/bin/perl
+#
+# Show lun information and HBA related info in AIX
+#
+#
+# Copyright Armin Kunaschik
+# Version 1.0  complete rewrite
+# Version 1.01 added FC connection and speed to -f
+# Version 1.02 added effective queue depth from kernel to -d -l
+# Version 1.03 10TB disk size "support" :-)
+# Version 1.04 display permanent and temporary system firmware
+# Version 1.05 moved new firmware into long output
+#              added GiB display with -g in info view
+#              added virtual fibre channel support for -f, -v
+#              changed serials hash to hold separate location info for systems
+#              dynamic column width for some columns in -i
+# Version 1.06 get virtual WWPNs from fcstat instead from lscfg
+# Version 1.07 pcmpath adapter states added, more dynamic columns and cosmetics
+#              basic generic AIX mpio disk (mpioosdisk) detection
+# Version 1.08 more sanity checking for fcs adapters in edge cases
+# Version 1.09 added 2 new p770
+# Version 1.10 moved storage and ms serials out into XML cfg file
+# Version 1.11 ignore sasarray disks, support maybe added later
+# Version 1.12 added -L option to dump cfg information
+#              added support for Hitachi VSP devices
+# Version 1.13 worked around a fcstat hang when fc link is down
+# Version 1.14 bug IV79359 -> vfc host detection in -v needs a workaround
+# Version 1.15 emfscsi detection added. Newer servers come with this new type
+#              of FC adapters
+#              added PowerHA 7 cluster repository disk detection (backup disks)
+# Version 1.16 IBM moved pcmpath to /usr/sbin, added detection to find both
+# Version 1.17 Fixed scsi id detection for mpioosdisks on 2145
+
+use strict;
+use IPC::Open2;
+use Getopt::Long;
+use List::Util qw( max );
+use XML::Simple; # for config file
+#use Data::Dumper;
+
+my $luninfo_version="1.17";
+
+my $cfgfile="/etc/luninfo.cfg";
+
+
+my %disks;
+my %paths;
+my %path_defaults;
+
+sub usage {
+	print STDERR "Usage: $0 [-h] [-V] [-L] [-H | [ -d [ -l ] | -f [ -l ] | -v | -p | -m | -i [ -l ] [ -g ] ] ]\n";
+	print STDERR "  -h      display this help\n";
+	print STDERR "  -V      display version\n";
+	print STDERR "  -d      list disk detail\n";
+	print STDERR "  -f      list fibre channel hba detail\n";
+	print STDERR "  -g      display disk size in GiB\n";
+	print STDERR "  -H      don't display header line, only useful in combination with other options\n";
+	print STDERR "  -i      display disk info summary (default when there is no -i, -d, -f, -m, -p or -v)\n";
+	print STDERR "  -l      long list; display more information like uuid, mirror pool detail, locations, firmware versions\n";
+	print STDERR "  -m      show managed system info\n";;
+	print STDERR "  -p      list disk paths and priority\n";
+	print STDERR "  -v      list virtual scsi and fibre channel hba detail\n";
+	print STDERR "  -L      list all known dc locations and serial numbers\n";
+	exit 1;
+
+}
+
+my %options = ( 'ms' => 0,
+	'disks' => 0,
+	'fscsi' => 0,
+	'gigabyte' => 0,
+	'info' => 0,	# default option used when no other option is present
+	'virtual' => 0,
+	'paths' => 0,
+	'long' => 0,
+	'noheader' => 0,
+	'version' => 0,
+	'list' => 0,
+	'help' => 0
+);
+
+my %option_constraints = (
+	'mutual_exclusive' => [ 'info', 'disks','fscsi','virtual','paths','ms','version','list'] ,
+	# put here only valid combinations of the mutual exclusive options... at least one!!!
+	'valid_combinations' => { 'info' => [ 'long', 'noheader', 'gigabyte'],
+				  'disks' => [ 'long','noheader' ],
+				  'fscsi' => [ 'long', 'noheader' ],
+				  'virtual' => [ 'noheader' ],
+				  'paths' => [ 'noheader' ],
+				  'version' => [ 'none' ], # none is pseudo option, TODO: improve argument checking :-)
+				  'list' => [ 'none' ], # none is pseudo option, TODO: improve argument checking :-)
+				  'ms' => [ 'noheader', 'long' ]
+
+			  	}
+);
+#print Data::Dumper->Dump([\%option_constraints]);
+
+Getopt::Long::Configure ("bundling");	# enable bundling of options like -lp same as -l -p
+GetOptions(	"m"	=> \$options{'ms'},
+		"d"	=> \$options{'disks'},
+		"f"	=> \$options{'fscsi'},
+		"g"	=> \$options{'gigabyte'},
+		"i"	=> \$options{'info'},
+		"H"	=> \$options{'noheader'},
+		"v"	=> \$options{'virtual'},
+		"p"	=> \$options{'paths'},
+		"l"	=> \$options{'long'},
+		"V"	=> \$options{'version'},
+		"h"	=> \$options{'help'},
+		"L"	=> \$options{'list'},
+	) or usage;
+
+# any option list containing -h will display usage
+if ( $options{'help'} ) { usage; };
+
+#print Data::Dumper->Dump([\%options]);
+
+my $sum_opts=0;
+foreach my $option ( @{$option_constraints{'mutual_exclusive'}} ) {
+	$sum_opts += $options{$option};
+}
+# no exclusive option found? -> set 'info' as default
+if ( $sum_opts == 0 ) { $sum_opts+=1; $options{'info'} = 1; }
+if ( $sum_opts > 1 ) { # there can only be one of this options left, bail out if not
+	print STDERR "Invalid combination of arguments!\n";
+	usage;
+}
+
+# check for valid combinations of the 1 exclusive option we found earlier
+foreach my $option ( @{$option_constraints{'mutual_exclusive'}} ) {
+	next if ( ! $options{$option} ); # check only active option
+
+	my $regex=join("|",@{$option_constraints{'valid_combinations'}->{$option}});
+	#print ">>>$option valid combinations: $regex\n";
+	my @leftover=grep(!/$regex|$option/,keys %options);
+	#my $tmp=join(":",@leftover);
+	#print "### leftover to check: $tmp\n";
+	my $sum_opts=0;
+	foreach my $leftover_option ( @leftover ) {
+		$sum_opts+= $options{$leftover_option};
+	}
+	if ( $sum_opts > 0 ) {
+		print STDERR "Invalid combination of arguments!\n";
+		usage;
+	}
+}
+
+# show one line with version information
+if ( $options{'version'} ) {
+	print "luninfo version $luninfo_version\n";
+	exit 0;
+}
+
+my %locations;	# storage box locations
+my %serials;	# serials, names and locations of managed systems
+my $cfg; #configuration hash
+
+# read locations and serials from config file only when necessary
+if ( $options{'ms'} || $options{'info'} || $options{'list'} ) {
+
+	
+	if ( -e $cfgfile ) {
+		$cfg=XMLin($cfgfile, ForceArray => 1);
+	}
+	
+	# XML config file example
+	# IMPORTANT!!!! There are NO # comments allowed in the config file!!!!!
+	# Also important: locations, storage and ms serial numbers (that is "name"-elements) need to be unique!!!
+	#
+	#<config>
+	#<location name="DC1" comment="Datacenter 1">
+	# <storage name="12345" comment="SVC1"></storage>
+	# <ms name="0612346" ms-name="p770dc11" rack="A1-B4" comment=""></ms>
+	# <ms name="0612347" ms-name="p770dc12" rack="A2-B2" comment=""></ms>
+	#</location>
+	#<location name="DC2" comment="Data Center 2">
+	# <storage name="12346" comment="SVC2"></storage>
+	# <ms name="0612348" ms-name="p770dc21" rack="A5-B6" comment=""></ms>
+	# <ms name="0612349" ms-name="p770dc22" rack="A5-B7" comment=""></ms>
+	#</location>
+	#</config>
+	#
+	# will generate this cfg hash:
+	#
+	# $cfg = {
+	#       'location' => {
+	#               'DC1' => {
+	#                       'comment' => "Data Center 1"
+	#			'storage' => {
+	#				'12345' => {
+	#					comment => 'SVC1'
+	#					}
+	#				},
+	#			'ms' => {
+	#				'6512346' => {
+	#					'ms-name' => 'p770dc11',
+	#					'rack => 'A1-B4'
+	#					'comment => ''
+	#					},
+	#				'6523457' => {
+	#					'ms-name' = 'p770dc12'
+	#					'rack => 'A2-B2'
+	#					'comment' => '',
+	#					}
+	#				}
+	#                       },
+	#               'DC2' => {
+	#                       'comment' => "Data Center 2"
+	#			'storage' => {
+	#				'12346' => {
+	#					comment => 'SVC2'
+	#					}
+	#				},
+	#			'ms' => {
+	#				'0612348' => {
+	#					'ms-name' => 'p770dc21',
+	#					'comment => ''
+	#					'rack => 'A5-B6'
+	#					},
+	#				'0612349' => {
+	#					'ms-name' = 'p770dc22',
+	#					'comment' => ''
+	#					'rack => 'A5-B7'
+	#					}
+	#				}
+	#                       }
+	#               }
+	#       }
+	#               
+	# comment elements are currently not used for anything except printing the device dump with -L!
+	
+	# some sanity check for the config file
+	# build storage location (%location) and serials hash (%serials)
+	# duplicate serials are only recognized when they appear in different locations
+	foreach my $location ( keys %{$cfg->{'location'}} ) {
+		foreach my $element ( keys %{$cfg->{'location'}->{$location}} ) {
+			for ( $element) {
+				if ( /storage/ ) {
+					foreach my $box ( keys %{$cfg->{'location'}->{$location}->{$element}} ) {
+						if ( defined $locations{$box} ) {
+							print STDERR "ERROR in $cfgfile: Duplicate use of storage serial $box! Using first definition.\n";
+							next;
+						}
+						$locations{$box}=$location;
+					}
+				} elsif ( /ms/ ) {
+					foreach my $ms ( keys %{$cfg->{'location'}->{$location}->{$element}} ) {
+						if ( defined $serials{$ms} ) {
+							print STDERR "ERROR in $cfgfile: Duplicate use of managed system serial $ms! Using first definition.\n";
+							next;
+						}
+						if ( defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'rack'} ) {
+							$serials{$ms}->{'rack'}=$cfg->{'location'}->{$location}->{$element}->{$ms}->{'rack'};
+						}
+						# only add if ms-name is defined, otherwise
+						if ( defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'ms-name'} ) {
+							$serials{$ms}->{'name'}=$cfg->{'location'}->{$location}->{$element}->{$ms}->{'ms-name'};
+							$serials{$ms}->{'location'}=$location;
+						} else {
+							print STDERR "ERROR: Incomplete entry in $cfgfile! Ignoring location $location serial $ms: ms-name missing!\n"
+						}
+					}
+				} # add more elements here if wanted
+			}
+		}
+	}
+}
+
+# IBM changed the path of pcmpath from /usr/bin to /usr/sbin some time, shortly before dumping sddpcm... sigh
+my $pcmpath="";
+if ( -x "/usr/bin/pcmpath" ) {
+	$pcmpath="/usr/bin/pcmpath"
+} elsif ( -x "/usr/sbin/pcmpath" ) {
+	$pcmpath="/usr/sbin/pcmpath"
+}
+
+# subroutine to sort the disks/devices (like hdiskXY/fscsiXX) numerically rather than alphabetically
+sub device_numerically {
+	$a=~ /\D+(\d+)/;
+	my $aa=$1;
+	$b=~ /\D+(\d+)/;
+	my $bb=$1;
+	$aa <=> $bb;
+}
+
+# option -i, -d, -p
+# read the disk types and availability of all known disks and put it into %disks
+sub get_all_disk_devs {
+	open(CMD,"/usr/sbin/lsdev -c disk -F'name subclass type status'|") or die "Error running lsdev -c disk -F'name subclass type'!";
+	# vSCSI disks have the type vdisk here, regardless of the storage system.. find more about it later
+	while(<CMD>) {
+		chomp;
+		if ( m/(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/ ) {
+			$disks{$1}->{'name'}=$1;	# will also display defined disks
+			$disks{$1}->{'subclass'}=$2;
+			$disks{$1}->{'type'}=$3;
+			$disks{$1}->{'status'}=$4;
+		}
+	}
+	close(CMD);
+}
+
+# option -i
+# read all PVs and volume group names, get disk sizes
+sub get_all_pv_vg_sizes {
+	open(CMD,"/usr/sbin/lspv|") or die "Error running /usr/sbin/lspv!";
+	while(<CMD>) {
+		chomp;
+		if ( m/(\S+)\s+(\S+)\s+(\S+)\s+(\S+){0,1}/ ) {
+			#$disks{$1}->{'name'}=$1;
+			$disks{$1}->{'pvid'}=$2;
+			$disks{$1}->{'vg_name'}=$3;
+			$disks{$1}->{'vg_state'}=defined $4?$4:"-"; # just in case $4 didn't match
+			my $disk=$1;
+			# get size of each available disk... this is the most time consuming part
+			if ( $disks{$disk}->{'status'} eq "Available" ) {
+				open(GETCONF,"/usr/bin/getconf DISK_SIZE /dev/$disk 2>/dev/null|") or die "Error getting disk size for disk $disk !\n";
+				while(<GETCONF>) {
+					chomp;
+					# if size is requested in GiB
+					if ( $options{'gigabyte'} ) {
+						# size/1024 -> GiB
+						# if less than 1GiB, reduce decimal precision to 2
+						# same applies to disks out of GiB boundaries, like 1.5 GiB
+						$disks{$disk}->{'size'}=( $_ < 1024 || $_%1024 != 0 ) ? sprintf("%.2f",$_/1024) : $_/1024;
+					} else {
+						$disks{$disk}->{'size'}=$_;
+					}
+				}
+				close(GETCONF);
+				# check return code of finished process (shift right by 8)
+				my $rc=$? >> 8;
+				if ( $rc != 0 ) {
+					# disksize -> none if getconf gives error
+					$disks{$disk}->{'size'}="none";
+				}
+			} else {
+				# disksize -> none for defined disks
+				$disks{$disk}->{'size'}="none";
+			}
+		}
+	}
+	close(CMD);
+
+	# check for PowerHA 7 repository disks and mark backup repositories as caavg_backup
+	# for more detailed information use /usr/es/sbin/cluster/utilities/clmgr -v query repository
+	if ( -x "/usr/es/sbin/cluster/utilities/clmgr" ) { # are we running on a PowerHA 7.x cluster?
+		open(CMD,"/usr/es/sbin/cluster/utilities/clmgr view repository|") or die "Error running clmgr view repository.\n";
+		# hdisk0 (00cf3f460e15d3c1)
+		# hdisk1 (00cf3f460e15ecf0)
+		while(<CMD>) {
+			chomp;
+			if ( m/(\S+)\s+\S+/ ) {
+				if ( $disks{$1}->{'vg_name'} eq "None" ) {
+					# backup repository has no name and is not active -> give it a fake name
+					$disks{$1}->{'vg_name'}="caavg_backup";
+				}
+			}
+
+		}
+	}
+	#print Data::Dumper->Dump([\%disks]);
+}
+
+# option -i
+# get all unique id's from odm
+sub get_unique_ids {
+	my @odmdata;
+	{
+	local $/ = "CuAt:";
+	@odmdata = `/usr/bin/odmget -q "attribute=unique_id" CuAt`; # ODMDIR is not set explicitly, so take care... as always! :-)
+	}
+	for my $odmrecord (@odmdata){
+	        my @odmstanza = split "\n", $odmrecord; # list of lines in each stanza, including "CuAt" and empty lines
+		my $name=""; my $value="";
+		for my $line (@odmstanza){
+			if ($line =~ /\s+name\s+=\s+"(.*)"/) { $name = $1; }
+			if ($line =~ /\s+value\s+=\s+"(.*)"/) { $value = $1; }
+		}
+		if ( defined $disks{$name} ) { # only set unique_id if the disk is already known
+			$disks{$name}->{'unique_id'}=$value;
+		}
+	}
+	#print Data::Dumper->Dump([\%disks]);
+}
+
+
+# option -i, -d, -p (only because of PCM)
+# read disk parameters of all disks, mostly -d, because of lun_id -> also -c
+sub get_all_lun_params {
+	foreach my $disk ( keys %disks ) {
+		open(CMD,"/usr/sbin/lsattr -El $disk|") or die "Error running /usr/sbin/lsattr -El $disk !\n";
+		while(<CMD>) {
+			if ( /^PCM\s+(\S+)/)              { $disks{$disk}->{'PCM'}=$1; } # needed to get default path prio later
+			if ( /^hcheck_interval\s+(\S+)/ ) { $disks{$disk}->{'hcheck_interval'}=$1; }
+			if ( /^hcheck_mode\s+(\S+)/ )     { $disks{$disk}->{'hcheck_mode'}=$1; }
+			if ( /^hcheck_cmd\s+(\S+)/ )      { $disks{$disk}->{'hcheck_cmd'}=$1; } # only with vscsi
+			if ( /^queue_depth\s+(\S+)/ )     { $disks{$disk}->{'queue_depth'}=$1; }
+			if ( /^lun_id\s+(\S+)/ )          { $disks{$disk}->{'lun_id'}=$1; } # only for some physical disks (e.g. 2145, 1818..)
+			if ( /^rw_timeout\s+(\S+)/ )      { $disks{$disk}->{'rw_timeout'}=$1; } # not on vscsi
+			if ( /^reserve_policy\s+(\S+)/ )  { $disks{$disk}->{'reserve_policy'}=$1; }
+			if ( /^PR_key_value\s+(\S+)/ )    { $disks{$disk}->{'PR_key_value'}=$1; }
+			if ( /^algorithm\s+(\S+)/ )       { $disks{$disk}->{'algorithm'}=$1; }
+		}
+		close(CMD);
+
+		# get/match uuid, box, location etc from collected data
+		for ( $disks{$disk}{'type'} ) {
+			#2105    - 2105 models (ESS)
+			#2145    - 2145 models (SVC)
+			#2147    - 2147 models (SVC)
+			#2810XIV - XIV (maybe 2812 too) ???
+			#1750    - 1750 devices (DS 6000)
+			#2107    - 2107 devices (DS 8000)
+			#1724    - 1724 devices (DS 4100)
+			#1814    - 1814 devices (DS 4200 and DS 4700)
+			#1722    - 1722 devices (DS 4300)
+			#1742    - 1742 devices (DS 4400 and DS 4500)
+			#1815    - 1815 devices (DS 4800)
+			#1818    - 1818 devices (DS 5000)
+	
+			# or vscsi, scsd
+			if (/2145/) {
+				# SVC disks
+				# 3321360050768019081CFD800000000000A8404214503IBMfcp
+				# IBM storage WWN always start with 6005076
+				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'} =~ /^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+					$disks{$disk}->{'uuid'}=$1;
+					$disks{$disk}->{'box'}=$2;
+					$disks{$disk}->{'suid'}="$3:$4";
+					$disks{$disk}->{'box_type'}="2145";
+				}
+				# This should work from AIX 5.3 upwards for 2145
+				# This might work for DS5000 (type 1818) too, although I don't have a machine to test with
+				if ( defined $disks{$disk}->{'lun_id'} ) {
+					if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+						$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
+						# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
+					}
+				}
+			}
+			elsif (/2107/) {
+				# DS8000 family LUN
+				# 200B75G6831015607210790003IBMfcp
+				$disks{$disk}->{'unique_id'}=~m/^....(.......)((..)(..))..2107900..IBMfcp/;
+				$disks{$disk}->{'box'}=$1;
+				$disks{$disk}->{'uuid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
+				$disks{$disk}->{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2107";
+				# There is a lun_id for DS8000 too, but this contains the same info as $3$4 (0x40XX40XX00000000)
+				$disks{$disk}->{'scsi_id'}="-"
+			}
+			#elsif (/1814/) {
+				# there is no unique_id on DS4800 type boxes, but a ieee_volname (e.g. 600A0B800011FA78000035D648C5DBA1)
+				# don't know how to get the box serial from ieee_volname
+				# lun_id is the same as with 2145 => 0x0004000000000000 (remove last 12 "0" and leading "0" to get lun_id)
+				# on vscsi lpars, the ieee_volname is inside uniqe_id: 3520600A0B800011FA78000035D648C5DBA105VDASD03AIXvscsi
+			#}
+			elsif (/vdisk/) { # vSCSI disks
+				# SVC LUNs visible through VIO
+				# 48333321360050768019081CFD8000000000009D804214503IBMfcp05VDASD03AIXvscsi
+				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
+					$disks{$disk}->{'uuid'}=$1;
+					$disks{$disk}->{'box'}=$2;
+					$disks{$disk}->{'suid'}="$3:$4";
+					$disks{$disk}->{'box_type'}="2145";
+				}
+				# DS8000 family LUN visible through VIO
+				# 3520200B75CF371014A07210790003IBMfcp05VDASD03AIXvscsi"
+				elsif ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/........(.......)((..)(..))..2107900..IBMfcp..VDASD..AIXvscsi/ ) {
+					$disks{$disk}->{'box'}=$1;
+					$disks{$disk}->{'uuid'}="$1_$2";
+					$disks{$disk}->{'suid'}="$3:$4";
+					$disks{$disk}->{'box_type'}="2107";
+				}
+				# we don't know a method to get the real scsi-id of vscsi devices, set it to "-"
+				$disks{$disk}{'scsi_id'}="-"
+			
+			}
+			elsif (/mpioosdisk/) { # generic AIX MPIO
+				# SVC LUNs visible directly via FC or NPIV but without SDDPCM
+				# 33213600507680180867968000000000006E804214503IBMfcp
+				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+					$disks{$disk}->{'uuid'}=$1;
+					$disks{$disk}->{'box'}=$2;
+					$disks{$disk}->{'suid'}="$3:$4";
+					$disks{$disk}->{'box_type'}="2145";
+
+					if ( defined $disks{$disk}->{'lun_id'} ) {
+						if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+							$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
+							# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
+						}
+					}
+				}
+				# DS8000 family LUN directly via FC or NPIV but without SDDPCM
+				# 3520200B75CF371014A07210790003IBMfcp
+				elsif ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/........(.......)((..)(..))..2107900..IBMfcp/ ) {
+					$disks{$disk}->{'box'}=$1;
+					$disks{$disk}->{'uuid'}="$1_$2";
+					$disks{$disk}->{'suid'}="$3:$4";
+					$disks{$disk}->{'box_type'}="2107";
+
+					# we don't know a method to get the real scsi-id here too, so set it to "-"
+					$disks{$disk}{'scsi_id'}="-"
+				}
+			
+			}
+			elsif (/htcvspgx00mpio/) { # Hitachi VSP GX00 MPIO
+				# may also work with Hitachi boxes that use those disk types:
+				#         htc9900mpio
+				#         htchusvmmpio
+				#         htcuspmpio
+				#         htcuspvmpio
+				#         htcvspg1000mpio
+				#         htcvspmpio
+
+				# tested with Hitachi VSP G200 without HDLM, just AIX MPIO
+				# 240C504138FE013006OPEN-V07HITACHIfcp
+				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/........(....)((..)(..))..OPEN-...HITACHIfcp/ ) {
+					$disks{$disk}->{'box'}=$1;
+					$disks{$disk}->{'uuid'}="$1_$2";
+					$disks{$disk}->{'suid'}="$3:$4";
+					$disks{$disk}->{'box_type'}="HTC";
+				}
+				if ( defined $disks{$disk}->{'lun_id'} ) {
+					if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+						$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
+						# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
+					}
+				}
+			}
+			elsif (/scsd/) { # parallel or serial SCSI disk (subclass would be scsi and sas)
+				delete $disks{$disk}; # we are not interested in those -> remove from hash
+			}
+			elsif (/sisarray/) { # SAS RAID arrays
+				delete $disks{$disk}; # we are (currently) not interested in those -> remove from hash
+			} else {
+				print STDERR "Unknown/unsupported disk type $disks{$disk}->{'type'} for disk $disk found!\n";
+				delete $disks{$disk};
+			}
+		}
+	}
+	#print Data::Dumper->Dump([\%disks]);
+}
+
+# option -d
+# get effective queue_depth value for each disk from kernel
+# old function, replaced with a faster one. Problems: See below!
+#sub get_queuedepth_from_kernel {
+#	foreach my $disk ( sort keys %disks ) {
+#		local $/ = undef;
+#		my $scsidisk_info=qx{ /usr/bin/echo "scsidisk $disk" | /usr/sbin/kdb -script }; # or use open2
+#		my $line_no = 0;
+#		foreach my $entry ( split ( /^NAME\s+ADDRESS\s+STATE\s+CMDS_OUT\s+CURRBUF\s+LOW\n/m, $scsidisk_info ) ) {
+#			next if not $line_no++;	# remove first block of junk
+#			#print ">>>$entry\n";
+#			my $disk="";;
+#			if ( $entry =~ m/(\S+)/ ) { # first word is disk name
+#				$disk=$1;
+#			}
+#			my $queuedepth;
+#			#     ushort queue_depth   = 0x14;
+#			if ( $entry =~ m/\s+ushort\s+queue_depth\s+=\s+0x([\da-f]+);/m ) {
+#				$queuedepth= hex( $1);
+#				$disks{$disk}->{'queue_depth_kernel'}=$queuedepth;
+#			}
+#			#print "$disk $disks{$disk}->{'queue_depth_kernel'}\n";
+#		}
+#	}
+#}
+
+# option -d
+# get effective queue_depth value for each disk from kernel
+# TODO: Remove completly when there is no older AIX 7.1 anymore, queue_depth can be changed online in >7.1 TL3
+# so there is no need anymore to find out whether or not it is changed but not yet active
+sub get_queuedepth_from_kernel {
+	my $parallel_kdb_queries=10; # reduce if you see empty queuedepth values!
+	my $kdb_count=0;
+	my $number_of_disks= scalar(keys %disks);
+	my $initial_kdb_command=""; # no additional initial kdb command necessary
+	my $kdb_command=$initial_kdb_command;
+	foreach my $disk ( keys %disks ) {
+		$kdb_count++; $number_of_disks--;
+		$kdb_command .= "scsidisk $disk; ";
+		if ( $kdb_count == $parallel_kdb_queries || $number_of_disks == 0 ) {
+			my $disk_name=""; my $queuedepth="";
+			my $kdb_output=qx{ /usr/bin/echo "$kdb_command" | /usr/sbin/kdb -script };
+			my @paragraphs=split(/Executing\s+scsidisk\s+command/,$kdb_output);
+			foreach my $paragraph ( @paragraphs ) {
+				if ( $paragraph =~ m/^NAME\s+ADDRESS\s+STATE\s+CMDS_OUT\s+CURRBUF\s+LOW\n(\S+)/m ) {
+					$disk_name=$1;
+				}
+				if ( $paragraph =~ m/\s+ushort\s+queue_depth\s+=\s+0x([\da-f]+);/m) {
+					$queuedepth= hex( $1);
+				}
+				if ( $queuedepth ne "" && $disk_name ne "" ) {
+					$disks{$disk_name}->{'queue_depth_kernel'}=$queuedepth;
+					$queuedepth=""; $disk_name="";
+				}
+			}
+		$kdb_count=0; $kdb_command=$initial_kdb_command;
+		}
+	}
+}
+
+# option -i, -d, -p
+# get default path prio for each unique disk type
+
+sub get_default_path_prio {
+	my @odmdata;
+	{
+	local $/ = "PdPathAt:";
+	@odmdata = `/usr/bin/odmget -q "attribute=priority" PdPathAt`;
+	}
+	for my $odmrecord (@odmdata){
+	        my @odmstanza = split "\n", $odmrecord;
+		my $default=''; my $uniquetype='';
+		for my $line (@odmstanza){
+			if ($line =~ /\s+uniquetype\s+=\s+"(.*)"/) { $uniquetype = $1; }
+			if ($line =~ /\s+deflt\s+=\s+"(.*)"/) { $default = $1; }
+		}
+		if ( $uniquetype ne '' ) { $path_defaults{$uniquetype}=$default; }
+	}
+	#print Data::Dumper->Dump([\%path_defaults]);
+}
+
+
+# option -i, -d, -p
+# parse the lspath output to get all possible path information
+sub get_all_path_info {
+	open(CMD,'/usr/sbin/lspath -F "status name parent connection path_status path_id"|') or die "Error running /usr/sbin/lspath !\n";
+	while (<CMD>) {
+		chomp;
+		# Enabled hdisk2 vscsi0 810000000000 Available 0
+		my ($state, $disk, $adapter, $connection, $path_status, $path_id)=m/(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/;
+		next if ($disk =~m/^ses/);      # ignore SAS enclosures
+	
+		$paths{$disk}->{'id'}->{$path_id}->{'path_status'}=$path_status;
+		$paths{$disk}->{'id'}->{$path_id}->{'connection'}=$connection;	# currently unused, contains SCSI-ID for each path
+										# might be useful later
+	
+		# set defaults to 0
+		if ( not defined $paths{$disk}->{'count'} ) { $paths{$disk}->{'count'}=0; }
+		if ( not defined $paths{$disk}->{'enabled'} ) { $paths{$disk}->{'enabled'}=0; }
+		if ( not defined $paths{$disk}->{'not_enabled'} ) { $paths{$disk}->{'not_enabled'}=0; }
+		$paths{$disk}->{'count'}+=1;			# count paths
+	
+		if ( $state ne "Enabled" ) {
+			$paths{$disk}->{'not_enabled'}+=1;	# count "not enabled" paths
+		} else {
+			$paths{$disk}->{'enabled'}+=1;		# count enabled paths
+		}
+		$paths{$disk}->{'id'}->{$path_id}->{'adapter'}=$adapter;	# save state of every path/adapter
+		$paths{$disk}->{'id'}->{$path_id}->{'state'}=$state;		# save state of every path/adapter
+		$paths{$disk}->{'id'}->{$path_id}->{'select'}="-";		# defaults, to be overridden by sddpcm
+		$paths{$disk}->{'id'}->{$path_id}->{'errors'}="-";		# defaults, to be overridden by sddpcm
+		if ( defined $disks{$disk} && defined $disks{$disk}->{'PCM'} &&  defined $path_defaults{$disks{$disk}->{'PCM'}} ) { # because of autovivification
+			# set default prio of every disk when available
+			$paths{$disk}->{'id'}->{$path_id}->{'prio'}=$path_defaults{$disks{$disk}->{'PCM'}};
+		}
+	}
+	close(CMD);
+	#print Data::Dumper->Dump([\%paths]);
+}
+
+
+# option -p
+# override default path prio with actual prio (if set)
+# this applies to MPIO disks only. sddpcm disks don't put priorities here!
+sub get_all_path_prio {
+	my @odmdata;
+	{
+	local $/ = "CuPathAt:";
+	@odmdata = `/usr/bin/odmget -q "attribute=priority" CuPathAt`;
+	}
+	for my $odmrecord (@odmdata){
+	        my @odmstanza = split "\n", $odmrecord;
+		my $disk=""; my $path_id=""; my $value="";
+		for my $line (@odmstanza){
+			if ($line =~ /\s+name\s+=\s+"(.*)"/) { $disk = $1; }
+			if ($line =~ /\s+path_id\s+=\s+(.*)/) { $path_id = $1; }
+			if ($line =~ /\s+value\s+=\s+"(.*)"/) { $value = $1; }
+		}
+			if ( defined $paths{$disk} ) {
+				$paths{$disk}->{'id'}->{$path_id}->{'prio'}=$value;
+		}
+	}
+	#print Data::Dumper->Dump([\%paths]);
+}
+
+	# option -p
+# get all path priorities for sddpcm disks
+sub get_all_sdd_path_prio {
+	return if ( ! -x "$pcmpath" );
+	my $pcmpath_data = qx { $pcmpath query device};
+	my $rc=$? >> 8;
+	if ( $rc == 0 ) { # only when there is no error from pcmpath! There are rare occasions, where this is not right,
+			  # e.g. after sddpcm upgrade without reboot
+	
+		my $line_no = 0;
+		my $devname=""; my @path_info=();
+		foreach my $entry ( split ( /^DEV#:\s+\S+\s+|^Path#.*Errors\s*\n/m, $pcmpath_data ) ) {
+			next if not $line_no++;	# remove first block of junk
+			# there are 2 types of entries: device name and paths
+			if ( $entry =~ /DEVICE NAME:\s+(\S+)/ ) {
+				$devname = $1;
+				#print "dev=$devname\n";
+			} else {
+				@path_info=split( /\n/, $entry );
+				foreach my $path_element ( @path_info ) {
+					# fscsi0/path4 -> 4 corresponds to lspath path_id and can start with any number
+					# so p_path is not path_id!!!
+					#    0*    fscsi0/path0    OPEN  NORMAL   21341235     0
+					# or
+					#    0     fscsi2/path1    OPEN  NORMAL   21341235     0
+					if ( $path_element=~ m/\s+(\S+)\s+(\S+)\/path(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\d+)/ ) {
+						# $p_path=$3; $p_prio=$1; $p_adapter=$2; $p_state=$4; $p_mode=$5; $p_select=$6; $p_errors=$7;
+						$paths{$devname}{'id'}{$3}{'prio'}=$1;
+						$paths{$devname}{'id'}{$3}{'select'}=$6;
+						$paths{$devname}{'id'}{$3}{'errors'}=$7;
+					}
+				}
+			}
+		}
+	}
+	#print Data::Dumper->Dump([\%paths]);
+}	
+	
+# list content of cfg file -> data center locations, storage and managed system serials, racks and comments
+# option -L
+if ( $options{'list'} ) {
+	foreach my $location ( sort keys %{$cfg->{'location'}} ) {
+		printf("DC %s comment %s\n",
+			$location,
+			defined $cfg->{'location'}->{$location}->{'comment'} && length($cfg->{'location'}->{$location}->{'comment'}) >0 ? $cfg->{'location'}->{$location}->{'comment'}:"-"
+		);
+		foreach my $element ( reverse sort keys %{$cfg->{'location'}->{$location}} ) {
+			for ( $element) {
+				if ( /storage/ ) {
+					foreach my $box ( sort keys %{$cfg->{'location'}->{$location}->{$element}} ) {
+						printf(" storage box %s comment %s\n",
+							$box,
+							defined $cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'} && length($cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'}) >0 ? $cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'}:"-"
+						);
+					}
+						
+				} elsif ( /ms/ ) {
+					foreach my $ms ( sort keys %{$cfg->{'location'}->{$location}->{$element}} ) {
+						printf(" managed system %s serial %s rack %s comment %s\n",
+						defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'ms-name'}?$cfg->{'location'}->{$location}->{$element}->{$ms}->{'ms-name'}:"UNKNOWN",
+						$ms,
+						defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'rack'}?$cfg->{'location'}->{$location}->{$element}->{$ms}->{'rack'}:"-",
+						defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'} && length($cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'}) >0 ? $cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'}:"-"
+						);
+					}
+				}
+			}
+		}
+		print"\n";
+	}
+}
+# option -i
+elsif ( $options{'info'} ) {
+	get_all_disk_devs;
+	get_all_pv_vg_sizes;
+	get_unique_ids;
+	get_all_lun_params;
+	get_all_path_info;
+
+	# use dynamic widths for some columns
+	# calculate various max lengths
+	# always apply minimum sizes just in case there are no elements so the header can be displayed correctly
+	#my $max_disk_len=(sort { $b <=> $a } map { length($_) } map( $disks{$_}->{'name'}, keys %disks))[0];
+	my $max_disk_len=max(map length($_->{'name'}||0), values %disks);
+	$max_disk_len++; # add one more space for visibility
+	if ( $max_disk_len<5 ) { $max_disk_len=5; } # min size
+	my $max_size_len=max(map length($_->{'size'}), values %disks);
+	if ( $max_size_len<4 ) { $max_size_len=4; } # min size
+	#my $max_loc_len=max(map { length($_||0) } map( $locations{$disks{$_}->{'box'}}, keys %disks));
+	my $max_loc_len=max(map { length($locations{$_->{'box'}}||0)} values %disks);
+	if ( $max_loc_len<3 ) { $max_loc_len=3; } # min size
+	my $max_box_len=max(map length($_->{'box'}||0), values %disks);
+	if ( $max_box_len<3 ) { $max_box_len=3; } # min size
+	my $max_vg_len=max(map length($_->{'vg_name'}||0), values %disks);
+	if ( $max_vg_len<3 ) { $max_vg_len=3; } # min size
+	my $max_vg_state_len=max(map length($_->{'vg_state'}||0), values %disks);
+	if ( $max_vg_state_len<7 ) { $max_vg_state_len=7; } # min size, VGSTATE header is 7 chars long
+
+	# print the disk summary
+	if ( $options{'long'} ) {
+	# option -i -l
+	# get mirror pool names. This takes very long on 6.1 <TL8, 7.1 <TL2 (see IV61167)
+		open(CMD,"/usr/sbin/lspv -L -P 2>/dev/null|") or die "Error getting mirror pool names using lspv -L -P !\n";
+		while(<CMD>) {
+			chomp;
+			next if (/^Physical/);
+			my ($pv, $vg, $mirror_pool)=split;
+			if ( $mirror_pool eq "" ) { $mirror_pool="None"; }
+			# set only if the disk is defined (we threw out some disk types earlier!)
+			if ( defined $disks{$pv} ) { $disks{$pv}->{'mirror_pool'}=$mirror_pool; }
+		}
+		close(CMD);
+	
+		#print Data::Dumper->Dump([\%disks]);
+	
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-*s %*s %-*s %*s %34s %5s %4s %5s %10s %-16s %-*s %*s %6s %-8s\n",
+				$max_disk_len, "#DISK",
+				$max_size_len, "SIZE",
+				$max_loc_len, "LOC",
+				$max_box_len, "BOX",
+				"UUID",
+				"UID",
+				"SCSI",
+				"PATHS",
+				"STATE",
+				"PVID",
+				$max_vg_len, "VG",
+				$max_vg_state_len, "VGSTATE",
+				"TYPE",
+				"MPOOL"
+				);
+		}
+		foreach my $disk ( sort device_numerically keys %disks) {
+			printf("%-*s %*s %-*s %*s %34s %5s %4s %2s/%-2s %10s %-16s %-*s %*s %6s %-8s\n",
+				$max_disk_len, $disks{$disk}->{'name'},
+				$max_size_len, defined $disks{$disk}->{'size'} ? $disks{$disk}->{'size'} : "none",
+				$max_loc_len, defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "-",
+				$max_box_len, $disks{$disk}->{'box'},
+				$disks{$disk}->{'uuid'},
+				$disks{$disk}->{'suid'},
+				defined $disks{$disk}->{'scsi_id'} ? $disks{$disk}->{'scsi_id'} : "-",
+				$paths{$disk}->{'enabled'},
+				$paths{$disk}->{'count'},
+				$disks{$disk}->{'status'},
+				defined $disks{$disk}->{'pvid'} ? $disks{$disk}->{'pvid'} : "none",
+				$max_vg_len, defined $disks{$disk}->{'vg_name'} ? $disks{$disk}->{'vg_name'} : "-",
+				$max_vg_state_len, defined $disks{$disk}->{'vg_state'} ? substr($disks{$disk}->{'vg_state'},0,6) : "-", # compatibility with old luninfo
+				$disks{$disk}->{'box_type'},
+				defined $disks{$disk}->{'mirror_pool'}?$disks{$disk}->{'mirror_pool'}:"none"
+				);
+		}
+	} else { # plain option -i
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-*s %*s %-*s %*s %5s %4s %5s %10s %-16s %-*s %*s %6s\n",
+				$max_disk_len, "#DISK",
+				$max_size_len, "SIZE",
+				$max_loc_len, "LOC",
+				$max_box_len, "BOX",
+				"UID",
+				"SCSI",
+				"PATHS",
+				"STATE",
+				"PVID",
+				$max_vg_len, "VG",
+				$max_vg_state_len, "VGSTATE",
+				"TYPE"
+				);
+		}
+		foreach my $disk ( sort device_numerically keys %disks) {
+			printf("%-*s %*s %-*s %*s %5s %4s %2s/%-2s %10s %-16s %-*s %*s %6s\n",
+				$max_disk_len, $disks{$disk}->{'name'},
+				$max_size_len, defined $disks{$disk}->{'size'} ? $disks{$disk}->{'size'} : "none",
+				$max_loc_len, defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "-",
+				$max_box_len, $disks{$disk}->{'box'},
+				$disks{$disk}->{'suid'},
+				defined $disks{$disk}->{'scsi_id'} ? $disks{$disk}->{'scsi_id'} : "-",
+				$paths{$disk}->{'enabled'},
+				$paths{$disk}->{'count'},
+				$disks{$disk}->{'status'},
+				defined $disks{$disk}->{'pvid'} ? $disks{$disk}->{'pvid'} : "none",
+				$max_vg_len, defined $disks{$disk}->{'vg_name'} ? $disks{$disk}->{'vg_name'} : "-",
+				$max_vg_state_len, defined $disks{$disk}->{'vg_state'} ? substr($disks{$disk}->{'vg_state'},0,6) : "-", # compatibility with old luninfo
+				$disks{$disk}->{'box_type'}
+				);
+		
+		}
+	}
+
+} elsif ( $options{'disks'} ) {
+	# option -d
+
+	get_all_disk_devs;
+	get_all_lun_params;
+	get_all_path_info;
+	
+	if ( $options{'long'} ) {
+		get_queuedepth_from_kernel;
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-9s %3s %3s %3s %5s %-6s %-17s %-12s %-13s %-9s %-9s %-8s\n",
+				"#DISK","QD","QDK","WR","PATHS","PSTATE","ALGORITHM","RESERVE","HCHECK_C","HCHECK_I","HCHECK_M","PR_KEY_V");
+		}
+		foreach my $disk ( sort device_numerically keys %disks) {
+			printf("%-9s %3s %3s %3s %2s/%-2s %-6s %-17s %-12s %-13s %-9s %-9s %-8s\n",
+				$disks{$disk}->{'name'},
+				$disks{$disk}->{'queue_depth'},
+				defined $disks{$disk}->{'queue_depth_kernel'} ? $disks{$disk}->{'queue_depth_kernel'} : "-",
+				defined $disks{$disk}->{'rw_timeout'} ? $disks{$disk}->{'rw_timeout'} : "-",
+				$paths{$disk}->{'enabled'},
+				$paths{$disk}->{'count'},
+				($paths{$disk}->{'enabled'} == $paths{$disk}->{'count'}) ? "OK" : "NOT_OK",
+				defined $disks{$disk}->{'algorithm'} ? $disks{$disk}->{'algorithm'} : "-",
+				defined $disks{$disk}->{'reserve_policy'} ? $disks{$disk}->{'reserve_policy'} : "-",
+				defined $disks{$disk}->{'hcheck_cmd'} ? $disks{$disk}->{'hcheck_cmd'} : "-",
+				defined $disks{$disk}->{'hcheck_interval'} ? $disks{$disk}->{'hcheck_interval'} : "-",
+				defined $disks{$disk}->{'hcheck_mode'} ? $disks{$disk}->{'hcheck_mode'} : "-",
+				defined $disks{$disk}->{'PR_key_value'} ? $disks{$disk}->{'PR_key_value'} : "-"
+				);
+			}
+	} else {
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-9s %3s %3s %5s %-6s %-17s %-12s %-13s %-9s %-9s %-8s\n",
+				"#DISK","QD","WR","PATHS","PSTATE","ALGORITHM","RESERVE","HCHECK_C","HCHECK_I","HCHECK_M","PR_KEY_V");
+		}
+		foreach my $disk ( sort device_numerically keys %disks) {
+			printf("%-9s %3s %3s %2s/%-2s %-6s %-17s %-12s %-13s %-9s %-9s %-8s\n",
+				$disks{$disk}->{'name'},
+				$disks{$disk}->{'queue_depth'},
+				defined $disks{$disk}->{'rw_timeout'} ? $disks{$disk}->{'rw_timeout'} : "-",
+				$paths{$disk}->{'enabled'},
+				$paths{$disk}->{'count'},
+				($paths{$disk}->{'enabled'} == $paths{$disk}->{'count'}) ? "OK" : "NOT_OK",
+				defined $disks{$disk}->{'algorithm'} ? $disks{$disk}->{'algorithm'} : "-",
+				defined $disks{$disk}->{'reserve_policy'} ? $disks{$disk}->{'reserve_policy'} : "-",
+				defined $disks{$disk}->{'hcheck_cmd'} ? $disks{$disk}->{'hcheck_cmd'} : "-",
+				defined $disks{$disk}->{'hcheck_interval'} ? $disks{$disk}->{'hcheck_interval'} : "-",
+				defined $disks{$disk}->{'hcheck_mode'} ? $disks{$disk}->{'hcheck_mode'} : "-",
+				defined $disks{$disk}->{'PR_key_value'} ? $disks{$disk}->{'PR_key_value'} : "-"
+				);
+		}
+	}
+
+} elsif ( $options{'ms'} ) {
+	# option -m
+	# serial, machine type, firmware etc...
+	my %system;
+	open(CMD,'/usr/sbin/lsattr -El sys0|') or die "Error running lsattr -El sys0 !";
+	while(<CMD>) {
+		# systemid IBM,0306C090G Hardware system identifier False
+		# system serial is 06C090G!
+		if ( /^fwversion\s+IBM,(\S+)/) { $system{'fwversion'}=$1; }
+		# modelname IBM,9117-MMA Machine name False
+		if ( /^modelname\s+IBM,(\S+)/) { $system{'modelname'}=$1; }
+		# fwversion IBM,EM350_107 Firmware version and revision levels False
+		if ( /^systemid\s+IBM,..(\S+)/) { $system{'systemid'}=$1; }
+	}
+	close(CMD);
+	open(CMD,'/usr/sbin/lsmcode -r -t system|') or die "Error running lsmcode -r -t system !";
+	while(<CMD>) {
+		# system:EM350_159 (t) EM350_149 (p) EM350_159 (t)
+		if ( /^system:(\S+)\s+\(t\)\s+(\S+)\s+\(p\)\s+(\S+)\s+\(.\)/ ) {
+			$system{'active_firmware'}=$3;
+			$system{'permanent_firmware'}=$2;
+			$system{'temporary_firmware'}=$1;
+		}
+	}
+	close(CMD);
+	
+	if ( $options{'long'} ) { # option -l
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-15s %-10s %-11s %-11s %-11s %-10s %-8s %-8s\n","#MODELNAME","SYSTEMID","FIRMWARE","FIRMWARE(t)","FIRMWARE(p)","MSYSNAME","LOCATION","RACK");
+		}
+		printf("%-15s %-10s %-11s %-11s %-11s %-10s %-8s %-8s\n",
+			$system{'modelname'},
+			$system{'systemid'},
+			# just in case we are on a machine with "weird" lsmcode output -> print sys0 data
+			defined $system{'active_firmware'} ? $system{'active_firmware'} : $system{'fwversion'},
+			defined $system{'temporary_firmware'} ? $system{'temporary_firmware'} : "-",
+			defined $system{'permanent_firmware'} ? $system{'permanent_firmware'} : "-",
+			( defined $serials{$system{'systemid'}}->{"name"} and length $serials{$system{'systemid'}}->{"name"} ) ? $serials{$system{'systemid'}}->{"name"} : "UNKNOWN",
+			( defined $serials{$system{'systemid'}}->{"location"} and length $serials{$system{'systemid'}}->{"location"} ) ? $serials{$system{'systemid'}}->{"location"} : "UNKNOWN",
+			( defined $serials{$system{'systemid'}}->{"rack"} and length($serials{$system{'systemid'}}->{"rack"}) ) ? $serials{$system{'systemid'}}->{"rack"} : "-"
+			);
+	} else {
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-15s %-10s %-10s %-10s\n","#MODELNAME","SYSTEMID","FIRMWARE","MSYSNAME");
+		}
+		printf("%-15s %-10s %-10s %-10s\n",
+			$system{'modelname'},
+			$system{'systemid'},
+			# just in case we are on a machine with "weird" lsmcode output -> print sys0 data
+			defined $system{'active_firmware'} ? $system{'active_firmware'} : $system{'fwversion'},
+			defined $serials{$system{'systemid'}} ? $serials{$system{'systemid'}}->{"name"} : "UNKNOWN"
+			);
+
+	}
+}
+
+elsif ( $options{'fscsi'} ) {
+	# option -f
+	# get FibreChannel hba data
+	my %adapters;
+	open(CMD,'/usr/sbin/lsdev -Cc adapter -F name:status:type|') or die "Error running /usr/sbin/lsdev -Cc adapter -F name:status:type !\n";
+		# -S Available -> would list only available adapters
+	while (<CMD>) {
+		chomp;
+		next if ! /^fcs|IBM,vfc-client$/; # only physical and virtual fcs adapters, more to include here?
+		my ($adapter,$status,$type)=split(/:/);
+		$adapters{$adapter}->{'status'}=$status;
+		$adapters{$adapter}->{'name'}=$adapter;
+		$adapters{$adapter}->{'type'}=$type;
+
+		if ( $adapter =~ /^fcs/ ) {
+	#  fcs0             U78AB.001.WZSGDZK-P1-C4-T1  4Gb FC PCI Express Adapter (df1000fe)
+	#
+	#        Part Number.................10N7255
+	#        Serial Number...............1A109002A3
+	#        Manufacturer................001A
+	#        EC Level....................D77040
+	#        Customer Card ID Number.....5774
+	#        FRU Number..................10N7255    # sometimes there are spaces before the value!
+	#        Device Specific.(ZM)........3
+	#        Network Address.............10000000C9B775FA
+	#        ROS Level and ID............02E8277F
+	#        Device Specific.(Z0)........2057706D
+	#        Device Specific.(Z1)........00000000
+	#        Device Specific.(Z2)........00000000
+	#        Device Specific.(Z3)........03000909
+	#        Device Specific.(Z4)........FFE01212
+	#        Device Specific.(Z5)........02E8277F
+	#        Device Specific.(Z6)........06E12715
+	#        Device Specific.(Z7)........07E1277F
+	#        Device Specific.(Z8)........20000000C9B775FA
+	#        Device Specific.(Z9)........ZS2.71X15
+	#        Device Specific.(ZA)........Z1F2.70A5 
+	#        Device Specific.(ZB)........Z2F2.71X15
+	#        Device Specific.(ZC)........00000000
+	#        Hardware Location Code......U78AB.001.WZSGDZK-P1-C4-T1
+			open(CMD1,"/usr/sbin/lscfg -vl $adapter|") or die "Error running /usr/sbin/lscfg -vl $adapter !\n";
+			while(<CMD1>) {
+				if ( /\s+$adapter\s+(\S+)/ )                      { $adapters{$adapter}->{'hw_path'}=$1; }
+				if ( /\s+FRU Number\.+\s*(\S+)/ )                 { $adapters{$adapter}->{'fru_number'}=$1; }
+				if ( /\s+Network Address\.+\s*(\S+)/ )            { $adapters{$adapter}->{'wwpn'}=$1; }
+				if ( /\s+Part Number\.+\s*(\S+)/ )                { $adapters{$adapter}->{'part_number'}=$1; }
+				if ( /\s+Customer Card ID Number\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1; }
+				if ( /\s+Device Specific\.\(CC\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1; } # historic
+				if ( /\s+Feature Code\/Marketing ID\.+\s*(\S+)/ ) { $adapters{$adapter}->{'card_id'}=$1; } # historic
+				if ( /\s+Device Specific\.\(Z9\)\.+\s*..(\S+)/ )  { $adapters{$adapter}->{'firmware'}=$1; }
+				
+			}
+			close(CMD1);
+			# get tuning params from the adapter
+			open(CMD1,"/usr/sbin/lsattr -El $adapter|") or die "Error running /usr/sbin/lsattr -El $adapter !\n";
+			while(<CMD1>) {
+				if ( /^max_xfer_size\s+(\S+)/ ) { $adapters{$adapter}->{'max_xfer_size'}=$1; }
+				if ( /^num_cmd_elems\s+(\S+)/ ) { $adapters{$adapter}->{'num_cmd_elems'}=$1; }
+			}
+			close(CMD1);
+			# This will hopefully work on all FC HBAs!?
+			# get the fscsi protocol device from the HBA device parent, there is only one!(?)
+			my $device=qx{ /usr/sbin/lsdev -p $adapter  -F name -t efscsi }; # this will also find "Defined" adapters!
+			chomp($device);
+			if ( $device eq "" ) {
+				$device=qx{ /usr/sbin/lsdev -p $adapter  -F name -t emfscsi }; # newer models have emfscsi as type, and -t can only be used once with lsdev
+				chomp($device);
+			}
+			$adapters{$adapter}{'device'}=$device;
+			if ( $device ne "" ) { # device is empty when fcsX is Defined
+				open(CMD1,"/usr/sbin/lsattr -El $device|");
+				while(<CMD1>) {
+					if ( /^attach\s+(\S+)/ )       { $adapters{$adapter}->{'attach'}=$1; } # needed when no devscan is available
+					if ( /^dyntrk\s+(\S+)/ )       { $adapters{$adapter}->{'dyntrk'}=$1; }
+					if ( /^fc_err_recov\s+(\S+)/ ) { $adapters{$adapter}->{'fc_err_recov'}=$1; }
+				}
+				close(CMD1);
+			}
+			# override rubbish found in lscfg output for virtual fc adapters
+			if ( $adapters{$adapter}->{'type'} eq "IBM,vfc-client" ) {
+				$adapters{$adapter}->{'fru_number'}="VIRT";
+				$adapters{$adapter}->{'part_number'}="VIRT";
+				$adapters{$adapter}->{'card_id'}="VIRT";
+				$adapters{$adapter}->{'firmware'}="VIRT";
+
+			}
+		}
+	}
+	close(CMD);
+
+	# get wwpn, port speed and link state (attention type) via fcstat
+	foreach my $adapter ( keys %adapters ) {
+		# run fcstat only on adapters which are "switch" or "loop" attached. "none" will hang 30s!
+		# we work around this with -d, see below
+		# fcstat -D is undocumented but should run on all AIX versions including 5.3
+		# Attention Type is available in normal fcstat (also with -d) output in 6.1 TL9 and 7.1 TL3
+		#
+		# so first try to detect port speed and attention type in diag mode (-d) and
+		# only when this returns an error -> use -D
+		# it works because fcstat -d returns error 0d immediately when the adapter is in use
+		# this way hangs are reduced when an adapter has no link and is in "switch" mode (happens quite often)
+		open(CMD,"/usr/bin/fcstat -d $adapter 2>/dev/null|") or die "Error running /usr/bin/fcstat -d $adapter!\n";
+		while(<CMD>) {
+			chomp;
+			if ( /Port Speed \(running\):\s+(\d+)\s+GBIT/ ) { $adapters{$adapter}->{'linkspeed'}= $1; }
+			#if ( /Port Type:\s+(\S+)/ ) { $adapters{$adapter}->{'attach'}= lc($1); } # "Fabric" or "Private Loop"
+			if ( /Attention\s+Type:\s+Link\s+(\S+)/ )       { $adapters{$adapter}->{'linkstate'}= lc($1); }
+			if ( /^World Wide Port Name:\s0x(\S+)/ ) { $adapters{$adapter}->{'wwpn'}=$1; }
+		}
+		close(CMD);	# only close will set $? ! :-)
+		my $rc=$? >> 8;
+		if ( $rc != 0 ) { # run fcstat -D only when fcstat -d did not give any results
+			open(CMD,"/usr/bin/fcstat -D $adapter 2>/dev/null|") or die "Error running /usr/bin/fcstat -D $adapter!\n";
+			while(<CMD>) {
+				chomp;
+				if ( /Port Speed \(running\):\s+(\d+)\s+GBIT/ ) { $adapters{$adapter}->{'linkspeed'}= $1; }
+				#if ( /Port Type:\s+(\S+)/ ) { $adapters{$adapter}->{'attach'}= lc($1); } # "Fabric" or "Private Loop"
+				if ( /Attention\s+Type:\s+Link\s+(\S+)/ )       { $adapters{$adapter}->{'linkstate'}= lc($1); }
+				if ( /^World Wide Port Name:\s0x(\S+)/ ) { $adapters{$adapter}->{'wwpn'}=$1; }
+			}
+			close(CMD);
+		}
+	}
+
+	# get SDDPCM adapter state. Important on NPIV installations since AIX adapter state (speed, link state) does not reflect reality
+	if ( -x "$pcmpath" ) {
+		my $start_marker_not_found=1;
+		open(CMD,"$pcmpath query adapter|") or die "Error running $pcmpath query adapter!\n";
+		#     0  fscsi0   NORMAL   ACTIVE                 68          0      2       2
+		# IMPORTANT: The adapter name is fscsi, NOT fcs!!
+		while(<CMD>) {
+			chomp;
+			if ( /^Adpt/ ) { $start_marker_not_found=0; }
+			next if ( $start_marker_not_found );
+			if ( /\s+\d+\s+(\S+)\s+(\S+)\s+(\S+)\s+/ ) {
+				my $pdev=$1;
+				my $sdd_state=$2; # FAILED, DEGRAD, NORMAL
+				# now find associated fcs device
+				foreach my $adapter ( keys %adapters ) {
+					if ( defined $adapters{$adapter}->{'device'} && $adapters{$adapter}->{'device'} eq $pdev ) {
+						$adapters{$adapter}->{'sdd_state'}=$sdd_state;
+					}
+				}
+			}
+		}
+		close(CMD);
+	}
+	#}
+	#print Data::Dumper->Dump([\%adapters]);
+	
+	# use dynamic widths for some columns
+	# calculate various max lengths
+	# always apply minimum sizes just in case there are no elements so the header can be displayed correctly
+	my $max_loc_len=max(map length($_->{'hw_path'}||0), values %adapters);
+	if ( $max_loc_len<8 ) { $max_loc_len=8; } # min size
+	my $max_err_recv_len=max(map length($_->{'fc_err_recov'}||0), values %adapters);
+	if ( $max_err_recv_len<10 ) { $max_err_recv_len=10; } # min size
+	my $max_fw_len=max(map length($_->{'firmware'}||0), values %adapters);
+	if ( $max_fw_len<4 ) { $max_fw_len=4; } # min size
+	my $max_fru_len=max(map length($_->{'fru_number'}||0), values %adapters);
+	if ( $max_fru_len<4 ) { $max_fru_len=4; } # min size
+	my $max_pn_len=max(map length($_->{'part_number'}||0), values %adapters);
+	if ( $max_pn_len<4 ) { $max_pn_len=4; } # min size
+	my $max_fc_len=max(map length($_->{'card_id'}||0), values %adapters);
+	if ( $max_fc_len<4 ) { $max_fc_len=4; } # min size
+
+	# print FC hba status
+	if ( $options{'long'} ) { # option -l
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-5s %-9s %-6s %-6s %4s %5s %-*s %-*s %-*s %-*s %-*s %-16s %-7s %-6s %-*s %9s %-6s\n",
+				"#HBA",
+				"STATE",
+				"SDD",
+				"ATTACH",
+				"LINK",
+				"SPEED",
+				$max_loc_len,"HW_PATH",
+				$max_fw_len,"FW",
+				$max_fru_len,"FRU",
+				$max_pn_len,"PN",
+				$max_fc_len,"FC",
+				"WWPN",
+				"FSCSI",
+				"DYNTRK",
+				$max_err_recv_len,"FC_ERR_REC",
+				"MAX_XFER",
+				"NUMCMD");
+		}
+		foreach my $adapter ( sort device_numerically keys %adapters ) {
+			#next if ( $adapter !~/^fcs/ );	# adapters are filtered out earlier
+			printf("%-5s %-9s %-6s %-6s %4s %5s %-*s %-*s %-*s %-*s %-*s %-16s %-7s %-6s %-*s %9s %-6s\n",
+				$adapters{$adapter}->{'name'},
+				$adapters{$adapter}->{'status'},
+				defined $adapters{$adapter}->{'sdd_state'} ? $adapters{$adapter}->{'sdd_state'} : "-",
+				defined $adapters{$adapter}->{'attach'} ? $adapters{$adapter}->{'attach'} : "UNKN",
+				defined $adapters{$adapter}->{'linkstate'} ? $adapters{$adapter}->{'linkstate'} : "UNKN",
+				defined $adapters{$adapter}->{'linkspeed'} ? $adapters{$adapter}->{'linkspeed'} : "-",
+				$max_loc_len, $adapters{$adapter}->{'hw_path'},
+				$max_fw_len, defined $adapters{$adapter}->{'firmware'} ? $adapters{$adapter}->{'firmware'} : "UNKN",
+				$max_fru_len, defined $adapters{$adapter}->{'fru_number'} ? $adapters{$adapter}->{'fru_number'} : "UNKN",
+				$max_pn_len, defined $adapters{$adapter}->{'part_number'} ? $adapters{$adapter}->{'part_number'} : "UNKN",
+				$max_fc_len, defined $adapters{$adapter}->{'card_id'} ? $adapters{$adapter}->{'card_id'} : "-",
+				defined $adapters{$adapter}->{'wwpn'} ? $adapters{$adapter}->{'wwpn'} : "-",
+				( defined $adapters{$adapter}->{'device'} and length $adapters{$adapter}->{'device'} ) ? $adapters{$adapter}->{'device'} : "UNKN",
+				defined $adapters{$adapter}->{'dyntrk'} ? $adapters{$adapter}->{'dyntrk'} : "-",
+				$max_err_recv_len, defined $adapters{$adapter}->{'fc_err_recov'} ? $adapters{$adapter}->{'fc_err_recov'} : "-",
+				$adapters{$adapter}->{'max_xfer_size'},
+				$adapters{$adapter}->{'num_cmd_elems'}
+				);
+		}
+	} else { # plain option -f
+		if ( ! $options{'noheader'} ) { # option -H
+			printf("%-5s %-9s %-6s %-6s %4s %5s %-*s %-16s %-7s %-6s %-*s %9s %-6s\n",
+				"#HBA",
+				"STATE",
+				"SDD",
+				"ATTACH",
+				"LINK",
+				"SPEED",
+				$max_loc_len,"HW_PATH",
+				"WWPN",
+				"FSCSI",
+				"DYNTRK",
+				$max_err_recv_len,"FC_ERR_REC",
+				"MAX_XFER",
+				"NUMCMD");
+		}
+		foreach my $adapter ( sort device_numerically keys %adapters ) {
+			#next if ( $adapter !~/^fcs/ );	# adapters are filtered out earlier
+			printf("%-5s %-9s %-6s %-6s %4s %5s %-*s %-16s %-7s %-6s %-*s %9s %-6s\n",
+				$adapters{$adapter}->{'name'},
+				$adapters{$adapter}->{'status'},
+				defined $adapters{$adapter}->{'sdd_state'} ? $adapters{$adapter}->{'sdd_state'} : "-",
+				defined $adapters{$adapter}->{'attach'} ? $adapters{$adapter}->{'attach'} : "UNKN",
+				defined $adapters{$adapter}->{'linkstate'} ? $adapters{$adapter}->{'linkstate'} : "UNKN",
+				defined $adapters{$adapter}->{'linkspeed'} ? $adapters{$adapter}->{'linkspeed'} : "-",
+				$max_loc_len, $adapters{$adapter}->{'hw_path'},
+				defined $adapters{$adapter}->{'wwpn'} ? $adapters{$adapter}->{'wwpn'} : "-",
+				( defined $adapters{$adapter}->{'device'} and length $adapters{$adapter}->{'device'} ) ? $adapters{$adapter}->{'device'} : "UNKN",
+				defined $adapters{$adapter}->{'dyntrk'} ? $adapters{$adapter}->{'dyntrk'} : "-",
+				$max_err_recv_len, defined $adapters{$adapter}->{'fc_err_recov'} ? $adapters{$adapter}->{'fc_err_recov'} : "-",
+				$adapters{$adapter}->{'max_xfer_size'},
+				$adapters{$adapter}->{'num_cmd_elems'}
+				);
+		}
+	}
+}
+
+elsif ( $options{'virtual'} ) {
+	# option -v
+	# get vSCSI hba data
+	my %adapters;
+	open(CMD,'/usr/sbin/lsdev -Cc adapter -t IBM,v-scsi -F name,status,physloc|') or die "Error running /usr/sbin/lsdev -Cc adapter -t IBM,v-scsi -F name,status,physloc !\n";
+	while (<CMD>) {
+		chomp;
+		#next if ! /^vscsi/; # any more patterns to match/exclude here?
+		my ($adapter,$status,$hwpath) = split(/,/);
+		$adapters{$adapter}->{'status'} = $status;
+		$adapters{$adapter}->{'name'} = $adapter;
+		$adapters{$adapter}->{'physloc'} = $hwpath;
+		if ( $hwpath =~ /[^-]+\-V[0-9]+\-(C[0-9]+)/ ) {
+			$adapters{$adapter}->{'controller'} = $1;
+		}
+		if ( $adapter =~ /^vscsi/ ) { # probably redundant
+			open(CMD1,"/usr/sbin/lsattr -El $adapter|");
+			while(<CMD1>) {
+				if ( /^vscsi_err_recov\s+(\S+)/ ) { $adapters{$adapter}->{'vscsi_err_recov'}=$1; }
+				if ( /^vscsi_path_to\s+(\S+)/ )   { $adapters{$adapter}->{'vscsi_path_to'}=$1; }
+			}
+			close(CMD1);
+	
+			# get parent vhost and vio server later
+			# set proper defaults (e.g. for 5.3) for vhost and vio server
+			$adapters{$adapter}->{'vhost'}="-";
+			$adapters{$adapter}->{'vios'}="-";
+		}
+	}
+	close(CMD);
+	
+	open(CMD,'/usr/sbin/lsdev -Cc adapter -t IBM,vfc-client -F name,status,physloc|') or die "Error running /usr/sbin/lsdev -Cc adapter -t IBM,vfc-client -F name,status,physloc !\n";
+	while (<CMD>) {
+		chomp;
+		#next if ! /^fcs/; # any more patterns to match/exclude here?
+		my ($adapter,$status,$hwpath) = split(/,/);
+		$adapters{$adapter}->{'status'} = $status;
+		$adapters{$adapter}->{'name'} = $adapter;
+		$adapters{$adapter}->{'physloc'} = $hwpath;
+		if ( $hwpath =~ /[^-]+\-V[0-9]+\-(C[0-9]+)/ ) {
+			$adapters{$adapter}->{'controller'} = $1;
+		}
+
+		# just get fc_err_recov here, for more info use -f !
+
+		# get the fscsi protocol device from the HBA device parent, there is only one!(?)
+		my $device=qx{ /usr/sbin/lsdev -p $adapter  -F name -t efscsi }; # this will also find "Defined" adapters!
+		chomp($device);
+		if ( $device eq "" ) {
+			$device=qx{ /usr/sbin/lsdev -p $adapter  -F name -t emfscsi }; # newer models have emfscsi as type, and -t can only be used once with lsdev
+			chomp($device);
+		}
+		$adapters{$adapter}{'device'}=$device;
+		if ( $device ne "" ) { # device is empty when fcsX is Defined
+			open(CMD1,"/usr/sbin/lsattr -El $device|");
+			while(<CMD1>) {
+				if ( /^fc_err_recov\s+(\S+)/ ) { $adapters{$adapter}->{'vscsi_err_recov'}=$1; } # vscsi is used for the sake of simplicity only! :-)
+			}
+			close(CMD1);
+		}
+		# get parent vhost and vio server later
+		# set proper defaults (e.g. for 5.3) for vhost and vio server
+		$adapters{$adapter}->{'vhost'}="-";
+		$adapters{$adapter}->{'vios'}="-";
+	}
+	close(CMD);
+	#print Data::Dumper->Dump([\%adapters]);
+	
+	# get vhost,vfchost and vio servers from kdb... only if vscsi/vfc adapters are present
+	# will not return anything for defined adapters!
+
+	# fcs adapters temporarily removed from grep expression because it sometimes doesn't work (see below)
+	# this will reduce unnecessary delays
+	#if ( grep (/^vscsi|^fcs/, keys %adapters) ) { # don't run kdb when there are no vscsi or fcs adapters (real fc adapters don't show up)
+	if ( grep (/^vscsi/, keys %adapters) ) { # don't run kdb when there are no vscsi or fcs adapters (real fc adapters don't show up)
+		my $pid=open2(\*CMDIN, \*CMDOUT, "/usr/sbin/kdb -script"); # this will only work as root, errors (perm denied etc for non-root) are ignored
+		print CMDOUT "cvai;vfcs\n"; # "cvai" for vscsi devices, "vfcs" for vfscsi devices
+		close CMDOUT;
+		
+		while(<CMDIN>) {
+			# NAME       STATE    CMDS_ACTIVE  ACTIVE_QUEUE       HOST
+			# vscsi0     0x000007 0x0000000000 0x0                axvio62t->vhost34
+			# normal operation is state = 0x000007, change if other state doesn't give valid data
+			if ( /^(vscsi\d+)\s+\S+\s+\S+\s+\S+\s+(\S+)->(\S+)/) {
+				$adapters{$1}->{'vhost'} = $3;
+				$adapters{$1}->{'vios'}  = $2;
+			# NAME      ADDRESS             STATE   HOST      HOST_ADAP  OPENED NUM_ACTIVE
+			# fcs0      0xF1000100267D4000  0x0008  axvio66t  vfchost0  0x01    0x0000
+			# normal operation is state = 0x0008
+			# state = 0x0001: Mapping is missing on VIOS, HOST and HOST_ADAP are not valid
+			} elsif ( /^(fcs\d+)\s+\S+\s+(\S+)\s+(\S+)\s+(\S+)/ ) {
+				if ( $2 eq "0x0008" ) {
+					$adapters{$1}->{'vhost'} = $4;
+					$adapters{$1}->{'vios'}  = $3;
+				} else {
+					$adapters{$1}->{'vhost'} = "ERROR";
+					$adapters{$1}->{'vios'}  = "ERROR";
+				}
+			}
+		}
+		close(CMDIN);
+	}
+
+	# vfc adapters need special handling because sometimes the kdb vfcs command stops working because some internal kernel
+	# data was paged out (APAR IV79359)
+	# the next code block is a slow (+1..2s) workaround, the vfcs code above is still present, so the workaround can be removed easily later
+	if ( grep (/^fcs/, keys %adapters) ) { # don't run kdb when there are no fcs adapters (real fc adapters don't show up)
+		my $lke="";
+		my $le_data="";
+		my $vfcs_adap_info="";
+		my $pid=open2(\*CMDIN, \*CMDOUT, "/usr/sbin/kdb -script");
+		print CMDOUT "lke\n";
+		close(CMDOUT);
+
+		# get vfcdd driver number from list of kernel extension
+		while(<CMDIN>) {
+			chomp;
+			if ( /^\s*(\d+)\s+.*vfcdd$/ ) {
+				$lke=$1;
+				last;
+			}
+		}
+		close(CMDIN);
+
+		if ( $lke ne "" ) {
+			my $pid=open2(\*CMDIN, \*CMDOUT, "/usr/sbin/kdb -script");
+			print CMDOUT "lke -s $lke\n";
+			close(CMDOUT);
+
+			# get le_data address
+			while(<CMDIN>) {
+				chomp;
+				if ( /^\s*le_data\.+\s(\S+)\s+.*$/ ) {
+					$le_data=$1;
+					last;
+				}
+			}
+			close(CMDIN);
+		}
+
+		if ( $lke ne "" && $le_data ne "" ) {
+			my $pid=open2(\*CMDIN, \*CMDOUT, "/usr/sbin/kdb -script");
+			print CMDOUT "vfcsglob\n$le_data\n";
+			close(CMDOUT);
+
+			# get adapter info from vfcsglob data structure
+			while(<CMDIN>) {
+				chomp;
+				if ( /^\s*struct\s+vfc_adap_info\s+\S+\s+=\s+([0-9A-Fx]+);/ ) {
+					$vfcs_adap_info=$1;
+
+					my $pid2=open2(\*KDBIN, \*KDBOUT, "/usr/sbin/kdb -script");
+					print KDBOUT "vfcs $vfcs_adap_info\n";
+					close(KDBOUT);
+
+					local $/ = undef; # slurp all lines into variable
+					my $vfcs_struct=<KDBIN>;
+
+					#print "########\n$vfcs_struct\n########\n;
+					if ( $vfcs_struct =~ /.*adapter:\s+(\S+)\s+.*state:\s(\S+)\s+.*host_name:\s+(\S+)\s+host_device:\s(\S+)/s ) {
+						#print "adapter:state:host_name:host_device: $1 $2 $3 $4\n";
+						if ( $2 eq "0x8" ) {
+							$adapters{$1}->{'vhost'} = $4;
+							$adapters{$1}->{'vios'}  = $3;
+						} else {
+							$adapters{$1}->{'vhost'} = "ERROR";
+							$adapters{$1}->{'vios'}  = "ERROR";
+						}
+					}
+					close(KDBIN);
+				}
+			}
+			close(CMDIN);
+		}
+	}
+	
+	#print Data::Dumper->Dump([\%adapters]);
+	
+	# print vscsi/vfc hba status
+	if ( ! $options{'noheader'} ) { # option -H
+		printf("%-7s %-9s %-30s %-4s %-10s %-10s %-12s %-7s\n",
+			"#HBA","STATE","HW_PATH","SLOT","VIOS","VHOST","ERR_RECOV","PATH_TO");
+	}
+	foreach my $adapter ( sort keys %adapters ) {
+		next if ( $adapter !~/^vscsi|^fcs/ );
+		printf("%-7s %-9s %-30s %-4s %-10s %-10s %-12s %-7s\n",
+			$adapters{$adapter}->{'name'},
+			$adapters{$adapter}->{'status'},
+			$adapters{$adapter}->{'physloc'},
+			$adapters{$adapter}->{'controller'},
+			$adapters{$adapter}->{'vios'},
+			$adapters{$adapter}->{'vhost'},
+			defined $adapters{$adapter}->{'vscsi_err_recov'} ? $adapters{$adapter}->{'vscsi_err_recov'} : "-", # not present in early 5.3
+			defined $adapters{$adapter}->{'vscsi_path_to'} ? $adapters{$adapter}->{'vscsi_path_to'} : "-"
+			);
+	}
+} elsif ( $options{'paths'} ) {
+
+	# option -p
+	get_all_disk_devs;
+	get_all_lun_params; # because of PCM option to find default prio
+	get_default_path_prio;
+	get_all_path_info;
+	get_all_path_prio;
+	get_all_sdd_path_prio;
+
+	#print Data::Dumper->Dump([\%disks]);
+	#print Data::Dumper->Dump([\%path_defaults]);
+	#print Data::Dumper->Dump([\%paths]);
+
+	# view:
+	# DISK  DEVICE STATE    PRIO         SELECT         ERRORS
+	# hdisk vscsi  Enabled  vscsi-prio   -              -           from vscsi values
+	# hdisk fscsi  Enabled  pcmpath-path pcmpath-select -errors     from pcmpath query device
+	if ( ! $options{'noheader'} ) { # option -H
+		printf("%-9s %-8s %-8s %-10s %-5s %-10s %-10s\n",
+			"#DISK","ADAPTER","STATE","MODE","PRIO","SELECT","ERRORS");
+	}
+	foreach my $disk ( sort device_numerically keys %paths ) {
+		foreach my $path_id ( sort keys %{$paths{$disk}{'id'}} ) {
+			if ( defined $disks{$disk} ) { # print only paths for devices we want (e.g. no scsi/sas disks)
+				next if ( $disks{$disk}->{'type'} =~ /scsd/ ); # skip scsi/sas disks
+				printf("%-9s %-8s %-8s %-10s %-5s %-10s %-10s\n",
+					$disk,
+					$paths{$disk}{'id'}->{$path_id}->{'adapter'},
+					$paths{$disk}{'id'}->{$path_id}->{'state'},
+					$paths{$disk}{'id'}->{$path_id}->{'path_status'},
+					$paths{$disk}{'id'}->{$path_id}->{'prio'},
+					$paths{$disk}{'id'}->{$path_id}->{'select'},
+					$paths{$disk}{'id'}->{$path_id}->{'errors'}
+				);
+			}
+		}
+	}
+}
+#
+#
+# The end.

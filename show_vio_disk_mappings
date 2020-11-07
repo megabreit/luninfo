@@ -1,0 +1,365 @@
+#!/usr/bin/perl
+#
+# Shows LUN mappings of a VIOS environment faster than lsmap
+#
+# inspired by FUM :-)
+#
+# Armin Kunaschik
+# Version 1.0
+# Version 1.1 2011-11-29 added SCSI id's for 2145
+# Version 1.2 2012-03-12 added Nuernberg box serials
+# Version 1.3 2012-06-13 added short UUID (SUID), fixed column width
+# Version 1.4 2013-01-16 added 5th character to identify SVC serials
+# Version 1.5 2013-01-22 added new box serials, changes location naming conventions
+# Version 2.0 2014-03-21 code rewrite, changed 2145 scsi id detection, added lpar names to vhost mappings from kernel (kdb)
+# Version 2.1 2014-08-29 support for displaying disks sizes as large as 10TB
+# Version 2.2 2015-02-24 LPARID added, "support" for empty/defined vhosts or stopped LPARs
+# Version 2.3 2015-04-30 cosmetics: slot numbers left justified
+# Version 2.4 2020-11-07 moved serials and locations into luninfo.cfg
+#
+# Bugs: Script might display garbage for LPAR and/or LPARID when executed while a lpar is booting
+#       there is no documentation on all possible kdb output :-(
+#
+# Workaround: Don't execute while lpars are booting :-)
+
+
+use strict;
+#use Data::Dumper;
+use XML::Simple; # for config file
+
+my %disks;
+my %slots;
+my %locations;
+
+my $cfgfile="/etc/luninfo.cfg";
+my $cfg; #configuration hash
+
+# read locations from config file
+if ( -e $cfgfile ) {
+	$cfg=XMLin($cfgfile, ForceArray => 1);
+}
+
+foreach my $location ( keys %{$cfg->{'location'}} ) {
+        foreach my $element ( keys %{$cfg->{'location'}->{$location}} ) {
+                for ( $element) {
+                        if ( /storage/ ) {
+                                foreach my $box ( keys %{$cfg->{'location'}->{$location}->{$element}} ) {
+                                        if ( defined $locations{$box} ) {
+                                                print STDERR "ERROR in $cfgfile: Duplicate use of storage serial $box! Using first definition.\n";
+                                                next;
+                                        }
+                                        $locations{$box}=$location;
+				}
+			}
+		}
+	}
+}
+
+#print Data::Dumper->Dump([\%locations]);
+
+# read the disk types and availability
+open(CMD,"/usr/sbin/lsdev -c disk -F'name subclass type status'|") or die "Error running lsdev -c disk -F'name subclass type'!";
+while(<CMD>) {
+	chomp;
+	if ( m/(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/ ) {
+		$disks{$1}->{'name'}=$1;
+		$disks{$1}->{'subclass'}=$2;
+		$disks{$1}->{'type'}=$3;
+		$disks{$1}->{'status'}=$4;
+	}
+}
+close(CMD);
+
+# read all PVs and volume group names
+open(CMD,"/usr/sbin/lspv|") or die "Error running /usr/sbin/lspv!";
+while(<CMD>) {
+	chomp;
+	if ( m/(\S+)\s+(\S+)\s+(\S+)/ ) {
+		#$disks{$1}->{'name'}=$1;
+		$disks{$1}->{'pvid'}=$2;
+		$disks{$1}->{'vg_name'}=$3;
+		my $disk=$1;
+		# get size of each available disk... this is the most time consuming part
+		if ( $disks{$disk}->{'status'} eq "Available" ) {
+			open(CMD1,"/usr/bin/getconf DISK_SIZE /dev/$disk 2>/dev/null|") or die "Error getting disk size for disk $disk\n";
+			while(<CMD1>) {
+				chomp;
+				$disks{$disk}->{'size'}=$_;
+			}
+			close(CMD1);
+			# check error of finished process (shift right by 8)
+			my $rc=$? >> 8;
+			if ( $rc != 0 ) {
+				# disksize -> none if getconf gives error
+				$disks{$disk}->{'size'}="none";
+			}
+		} else {
+			# disksize -> none for defined disks
+			$disks{$disk}->{'size'}="none";
+		}
+	}
+}
+close(CMD);
+
+# get VTD to disk name mapping from ODM
+my @vtd_list;
+{
+	local $/="\n\n"; # record delimiter is 2 new lines = paragraph
+	@vtd_list=qx { /usr/bin/odmget -q "attribute=aix_tdev" CuAt };
+}
+#CuAt:
+#        name = "server1_dc1_lun1"
+#        attribute = "aix_tdev"
+#        value = "hdisk459"
+#        type = "R"
+#        generic = "D"
+#        rep = "s"
+#        nls_index = 5
+
+foreach my $vtd ( @vtd_list ) {
+	my $vtd_name="";
+	my $vtd_disk="";
+	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
+	if ( $vtd =~ m/\s+value\s+=\s+"(\S+)"/m ) { $vtd_disk = $1; }
+	if ( $vtd_disk ne "" && $vtd_name ne "" ) {
+		$disks{$vtd_disk}->{'vtd'}=$vtd_name;
+	}
+}
+undef @vtd_list;
+#print Data::Dumper->Dump([\%disks]);
+
+# get controller id's from slot list; will also show defined devices, although defined devices are currently not used
+open(CMD,'/usr/sbin/lsdev -Cc adapter -t IBM,v-scsi-host -F name,status,physloc|') or die "Error running /usr/sbin/lsdev -Cc adapter -t IBM,v-scsi-host -F name,status,physloc !\n";
+while(<CMD>) {
+	chomp;
+	my ($device,$status,$hwpath) = split(/,/);
+	if ( $hwpath =~ /[^-]+\-V[0-9]+\-(C[0-9]+)/ ) {
+		$slots{$device}=$1;
+	}
+}
+
+# get VTD to vhost mapping from ODM
+my %vhost2lpar;
+my @vtd_vhost_list;
+{
+	local $/="\n\n";
+	@vtd_vhost_list=qx { /usr/bin/odmget -q PdDvLn="virtual_target/vtdev/scdisk" CuDv };
+}
+#CuDv:
+#        name = "server1_dc1_lun1"
+#        status = 1
+#        chgstatus = 0
+#        ddins = ""
+#        location = ""
+#        parent = "vhost50"
+#        connwhere = "5"
+#        PdDvLn = "virtual_target/vtdev/scdisk"
+foreach my $vtd ( @vtd_vhost_list ) {
+	my $vtd_name="";
+	my $vtd_parent="";
+	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
+	if ( $vtd =~ m/\s+parent\s+=\s+"(\S+)"/m ) { $vtd_parent = $1; }
+	if ( $vtd_parent ne "" && $vtd_name ne "" ) {
+		$vhost2lpar{$vtd_parent}->{'vhost'}=$vtd_parent; # will be filled later, only available/configured vhosts will be put here
+		foreach my $disk ( keys %disks ) {
+			if ( defined $disks{$disk}->{'vtd'} && $disks{$disk}->{'vtd'} eq $vtd_name ) {
+				$disks{$disk}->{'vhost'}=$vtd_parent;
+				last;
+			}
+		}
+	}
+}
+undef @vtd_vhost_list;
+
+#print Data::Dumper->Dump([\%disks]);
+#print Data::Dumper->Dump([\%vhost2lpar]);
+
+# get all unique_id from ODM if there is a matching disk
+my @uuid_list;
+{
+	local $/="\n\n";
+	@uuid_list=qx { /usr/bin/odmget -q "attribute=unique_id" CuAt };
+}
+foreach my $uuid ( @uuid_list ) {
+	my $unique_id="";
+	my $name="";
+	if ( $uuid =~ m/\s+name\s+=\s+"(\S+)"/m ) { $name=$1; }
+	if ( $uuid =~ m/\s+value\s+=\s+"(\S+)"/m ) { $unique_id=$1; }
+	if ( $name ne "" && $unique_id ne "" && defined $disks{$name} ) {
+		$disks{$name}->{'unique_id'}=$unique_id;
+	}
+}
+undef @uuid_list;
+
+# get all lun_id's from ODM
+my @lunid_list;
+{
+	local $/="\n\n";
+	@lunid_list=qx { /usr/bin/odmget -q "attribute=lun_id" CuAt };
+}
+foreach my $luid ( @lunid_list ) {
+	my $lun_id="";
+	my $name="";
+	if ( $luid =~ m/\s+name\s+=\s+"(\S+)"/m ) { $name=$1; }
+	if ( $luid =~ m/\s+value\s+=\s+"(\S+)"/m ) { $lun_id=$1; }
+	if ( $name ne "" && $lun_id ne "" && defined $disks{$name} ) {
+		$disks{$name}->{'lun_id'}=$lun_id;
+	}
+}
+undef @uuid_list;
+#print Data::Dumper->Dump([\%disks]);
+
+foreach my $disk ( keys %disks ) {
+	#open(CMD,"/usr/sbin/lsattr -El $disk|") or die "Error running /usr/sbin/lsattr -El $disk !\n";
+	#while(<CMD>) {
+	#	if ( /^lun_id\s+(\S+)/ ) { $disks{$disk}->{'lun_id'}=$1; } # only for some physical disks (e.g. 2145, 1818..)
+	#}
+	#close(CMD);
+	#
+	# use type and subclass to separate disks
+	for ($disks{$disk}{'type'}) {
+		#2105    - 2105 models (ESS)
+		#2145    - 2145 models (SVC)
+		#2147    - 2147 models (SVC)
+		#1750    - 1750 devices (DS 6000)
+		#2107    - 2107 devices (DS 8000)
+		#1724    - 1724 devices (DS 4100)
+		#1814    - 1814 devices (DS 4200 and DS 4700)
+		#1722    - 1722 devices (DS 4300)
+		#1742    - 1742 devices (DS 4400 and DS 4500)
+		#1815    - 1815 devices (DS 4800)
+		#1818    - 1818 devices (DS 5000)
+
+		if (/2145/) {
+			# 3321360050768019081CFD800000000000A8404214503IBMfcp
+			# IBM storage WWN always start with 6005076
+			if ( $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+				$disks{$disk}->{'guid'}=$1;
+				$disks{$disk}->{'box'}=$2;
+				$disks{$disk}->{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2145";
+			}
+			# This should work from AIX 5.3 upwards for 2145
+			# This might work for DS5000 (type 1818) too, although I don't have a machine to test with
+			if ( defined $disks{$disk}->{'lun_id'} ) {
+				if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+					$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
+					# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
+				}
+			}
+		}
+		elsif (/2107/) {
+			# 200B75G6831015607210790003IBMfcp
+			if ( $disks{$disk}->{'unique_id'} =~ m/^....(.......)((..)(..))..2107.....IBMfcp/ ) {
+				$disks{$disk}{'box'}=$1;
+				$disks{$disk}{'guid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
+				#undef $disks{$name}; # we don't care about 2107 disks
+				$disks{$disk}{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2107";
+				# There is a lun_id for DS8000 too, but this contains the same info as $3$4 (0x40XX40XX00000000)
+				$disks{$disk}->{'scsi_id'}="-"
+			}
+		}
+		elsif (/vdisk/) {
+
+			if ( $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
+				$disks{$disk}{'guid'}=$1;
+				$disks{$disk}{'box'}=$2;
+				$disks{$disk}{'suid'}="$3:$4";
+				$disks{$disk}->{'box_type'}="2145";
+			}
+			# 3520200B75CF371014A07210790003IBMfcp05VDASD03AIXvscsi"
+			elsif ( $disks{$disk}->{'unique_id'} =~ m/........(.......)((..)(..))..2107.....IBMfcp..VDASD..AIXvscsi/ ) {
+				$disks{$disk}{'box'}=$1;
+				$disks{$disk}{'guid'}="$1_$2";
+				$disks{$disk}{'suid'}="$3:$4";
+				$disks{$disk}->{'scsi_id'}="-";
+				#undef $disks{$disk}; # we don't care about 2107 disks
+			}
+		
+		}
+		elsif (/scsd/) { # parallel or serial SCSI disk (subclass would be scsi and sas)
+			delete $disks{$disk}; # we are not interested in those -> remove from hash
+		} else {
+			print STDERR "Unknown disk type $disks{$disk}{'type'} for disk $disk found!\n";
+			undef $disks{$disk};
+		}
+	}
+}
+
+# get vhost to lpar mapping from kernel kdb... this takes some time! :-)
+# kdb queries are slow. let's query some info with the same kdb call (in "parallel"), 15 seems OK, 20 is NOT
+# looking for 2 lines:
+#         Target vSCSI Adapter Structure vhost0
+# client_data.srp_version: 16.aviosserver1      client_data.partition_name: server1
+my $parallel_kdb_queries=15; # 15 queries in 1 kdb call. Reduce if you see errors or missin lpar names
+my $kdb_count=0;
+my $number_of_vhosts= scalar(keys %vhost2lpar);
+my $initial_kdb_command= "svCmdIni; svPrQs; ";
+my $kdb_command=$initial_kdb_command;
+foreach my $vhost ( keys %vhost2lpar ) {
+	$kdb_count++; $number_of_vhosts--;
+	$kdb_command .= "svva $vhost; ";
+	if ( $kdb_count == $parallel_kdb_queries || $number_of_vhosts == 0 ) {
+		my $vhost_name=""; my $lpar_name=""; my $lpar_number="";
+		open(CMD,"echo \"$kdb_command\" \|/usr/sbin/kdb -script|" ) or die "Error running /usr/sbin/kdb -script !\n";
+		while(<CMD>) {
+			if ( m/\s+Target vSCSI Adapter Structure\s+(\S+)\b/ ) {
+				$vhost_name=$1;
+			}
+			if ( m/client_data.srp_version:\s+\S+\s+client_data.partition_name:\s+(\S+)\b/ ) {
+				$lpar_name=$1;
+			}
+			if ( m/client_data.srp_version:\s+client_data.partition_name:\s+$/ ) {
+				$lpar_name='none'; # special case of empty vhost
+			}
+			if ( m/client_data.partition_number:\s+([\da-fA-F]+)\b/ ) {
+				$lpar_number=$1; # 0 means "any partition" -> vhost is empty
+				# this reflects HMC profile values (partition id).
+			}
+			if ( $lpar_name ne "" && $vhost_name ne "" && $lpar_number ne "" ) {
+				$vhost2lpar{$vhost_name}->{'lpar_name'}=$lpar_name;
+				$vhost2lpar{$vhost_name}->{'lpar_number'}=hex($lpar_number);
+				$vhost_name=""; $lpar_name=""; $lpar_number="";
+			}
+		}
+		close(CMD);
+		$kdb_count=0; $kdb_command=$initial_kdb_command;
+	}
+}
+
+#print Data::Dumper->Dump([\%vhost2lpar]);
+
+# subroutine to sort the disks numerically rather than alphabetically
+sub disks_numerically {
+	$a=~ /\D+(\d+)/;
+	my $aa=$1;
+	$b=~ /\D+(\d+)/;
+	my $bb=$1;
+	$aa <=> $bb;
+}
+# print the whole thing
+printf("%-9s %32s %5s %8s %-8s %7s %4s %18s %-4s %8s %16s %12s %6s\n", "#DISK","UUID","SUID","SIZE","BOX","LOC","SCSI","PVID","SLOT","VHOST","VTD","LPAR","LPARID");
+foreach my $disk ( sort disks_numerically keys %disks) {
+	# for now just look at available disk...
+	if ( defined $disks{$disk}->{'status'} && $disks{$disk}->{'status'} eq "Available" ) {
+		printf("%-9s %32s %5s %8s %-8s %7s %4s %18s %-4s %8s %16s %12s %6s\n",
+			$disks{$disk}->{'name'},
+			$disks{$disk}->{'guid'},
+			$disks{$disk}->{'suid'},
+			$disks{$disk}->{'size'},
+			$disks{$disk}->{'box'},
+			defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "UNKN",
+			$disks{$disk}->{'scsi_id'},
+			$disks{$disk}->{'pvid'},
+			defined $slots{$disks{$disk}->{'vhost'}} ? $slots{$disks{$disk}->{'vhost'}} : "-",
+			defined $disks{$disk}->{'vhost'} ? $disks{$disk}->{'vhost'} : "-",
+			defined $disks{$disk}->{'vtd'} ? $disks{$disk}->{'vtd'} : "-",
+			defined $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_name'} ? $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_name'} : "-",
+			defined $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_number'} ? $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_number'} : "-"
+		);
+	}
+}
+#print Data::Dumper->Dump([\%disks]);
+
+# The end.
