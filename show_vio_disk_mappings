@@ -121,7 +121,7 @@ foreach my $vtd ( @vtd_list ) {
 	my $vtd_disk="";
 	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
 	if ( $vtd =~ m/\s+value\s+=\s+"(\S+)"/m ) { $vtd_disk = $1; }
-	if ( $vtd_disk ne "" && $vtd_name ne "" ) {
+	if ( $vtd_disk ne "" and $vtd_name ne "" ) {
 		$disks{$vtd_disk}->{'vtd'}=$vtd_name;
 	}
 }
@@ -159,10 +159,10 @@ foreach my $vtd ( @vtd_vhost_list ) {
 	my $vtd_parent="";
 	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
 	if ( $vtd =~ m/\s+parent\s+=\s+"(\S+)"/m ) { $vtd_parent = $1; }
-	if ( $vtd_parent ne "" && $vtd_name ne "" ) {
+	if ( $vtd_parent ne "" and $vtd_name ne "" ) {
 		$vhost2lpar{$vtd_parent}->{'vhost'}=$vtd_parent; # will be filled later, only available/configured vhosts will be put here
 		foreach my $disk ( keys %disks ) {
-			if ( defined $disks{$disk}->{'vtd'} && $disks{$disk}->{'vtd'} eq $vtd_name ) {
+			if ( defined $disks{$disk}->{'vtd'} and $disks{$disk}->{'vtd'} eq $vtd_name ) {
 				$disks{$disk}->{'vhost'}=$vtd_parent;
 				last;
 			}
@@ -185,7 +185,7 @@ foreach my $uuid ( @uuid_list ) {
 	my $name="";
 	if ( $uuid =~ m/\s+name\s+=\s+"(\S+)"/m ) { $name=$1; }
 	if ( $uuid =~ m/\s+value\s+=\s+"(\S+)"/m ) { $unique_id=$1; }
-	if ( $name ne "" && $unique_id ne "" && defined $disks{$name} ) {
+	if ( $name ne "" and $unique_id ne "" and defined $disks{$name} ) {
 		$disks{$name}->{'unique_id'}=$unique_id;
 	}
 }
@@ -202,7 +202,7 @@ foreach my $luid ( @lunid_list ) {
 	my $name="";
 	if ( $luid =~ m/\s+name\s+=\s+"(\S+)"/m ) { $name=$1; }
 	if ( $luid =~ m/\s+value\s+=\s+"(\S+)"/m ) { $lun_id=$1; }
-	if ( $name ne "" && $lun_id ne "" && defined $disks{$name} ) {
+	if ( $name ne "" and $lun_id ne "" and defined $disks{$name} ) {
 		$disks{$name}->{'lun_id'}=$lun_id;
 	}
 }
@@ -300,8 +300,10 @@ my $kdb_command=$initial_kdb_command;
 foreach my $vhost ( keys %vhost2lpar ) {
 	$kdb_count++; $number_of_vhosts--;
 	$kdb_command .= "svva $vhost; ";
-	if ( $kdb_count == $parallel_kdb_queries || $number_of_vhosts == 0 ) {
-		my $vhost_name=""; my $lpar_name=""; my $lpar_number="";
+	if ( $kdb_count == $parallel_kdb_queries or $number_of_vhosts == 0 ) {
+		my $vhost_name="";
+		my $lpar_name="";
+		my $lpar_number="";
 		open(CMD,"echo \"$kdb_command\" \|/usr/sbin/kdb -script|" ) or die "Error running /usr/sbin/kdb -script !\n";
 		while(<CMD>) {
 			if ( m/\s+Target vSCSI Adapter Structure\s+(\S+)\b/ ) {
@@ -317,7 +319,7 @@ foreach my $vhost ( keys %vhost2lpar ) {
 				$lpar_number=$1; # 0 means "any partition" -> vhost is empty
 				# this reflects HMC profile values (partition id).
 			}
-			if ( $lpar_name ne "" && $vhost_name ne "" && $lpar_number ne "" ) {
+			if ( $lpar_name ne "" and $vhost_name ne "" and $lpar_number ne "" ) {
 				$vhost2lpar{$vhost_name}->{'lpar_name'}=$lpar_name;
 				$vhost2lpar{$vhost_name}->{'lpar_number'}=hex($lpar_number);
 				$vhost_name=""; $lpar_name=""; $lpar_number="";
@@ -342,7 +344,7 @@ sub disks_numerically {
 printf("%-9s %32s %5s %8s %-8s %7s %4s %18s %-4s %8s %16s %12s %6s\n", "#DISK","UUID","SUID","SIZE","BOX","LOC","SCSI","PVID","SLOT","VHOST","VTD","LPAR","LPARID");
 foreach my $disk ( sort disks_numerically keys %disks) {
 	# for now just look at available disk...
-	if ( defined $disks{$disk}->{'status'} && $disks{$disk}->{'status'} eq "Available" ) {
+	if ( defined $disks{$disk}->{'status'} and $disks{$disk}->{'status'} eq "Available" ) {
 		printf("%-9s %32s %5s %8s %-8s %7s %4s %18s %-4s %8s %16s %12s %6s\n",
 			$disks{$disk}->{'name'},
 			$disks{$disk}->{'guid'},

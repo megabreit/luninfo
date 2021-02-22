@@ -193,7 +193,7 @@ foreach my $vhost ( keys %vscsi ) {
 				$lpar_number=$1; # 0 means "any partition" -> vhost is empty
 				# this reflects HMC profile values (partition id).
 			}
-			if ( $lpar_name ne "" && $vhost_name ne "" && $lpar_number ne "" ) {
+			if ( $lpar_name ne "" and $vhost_name ne "" and $lpar_number ne "" ) {
 				$vscsi{$vhost_name}->{"lpar_name"}=$lpar_name;
 				$vscsi{$vhost_name}->{"lpar_number"}=hex($lpar_number);
 				$vhost_name=""; $lpar_name=""; $lpar_number=""; #prevent leftover from earlier values
@@ -249,7 +249,7 @@ foreach my $vtd ( @vtd_list ) {
 	my $vtd_disk="";
 	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
 	if ( $vtd =~ m/\s+value\s+=\s+"(\S+)"/m ) { $vtd_disk = $1; }
-	if ( $vtd_disk ne "" && $vtd_name ne "" ) {
+	if ( $vtd_disk ne "" and $vtd_name ne "" ) {
 		$disks{$vtd_disk}->{'vtd'}=$vtd_name;
 	}
 }
@@ -276,9 +276,9 @@ foreach my $vtd ( @vtd_vhost_list ) {
 	my $vtd_parent="";
 	if ( $vtd =~ m/\s+name\s+=\s+"(\S+)"/m ) { $vtd_name = $1; }
 	if ( $vtd =~ m/\s+parent\s+=\s+"(\S+)"/m ) { $vtd_parent = $1; }
-	if ( $vtd_parent ne "" && $vtd_name ne "" ) {
+	if ( $vtd_parent ne "" and $vtd_name ne "" ) {
 		foreach my $disk ( keys %disks ) {
-			if ( defined $disks{$disk}->{'vtd'} && $disks{$disk}->{'vtd'} eq $vtd_name ) {
+			if ( defined $disks{$disk}->{'vtd'} and $disks{$disk}->{'vtd'} eq $vtd_name ) {
 				$disks{$disk}->{'vhost'}=$vtd_parent;
 				$vscsi{$vtd_parent}->{'disks'}->{$disk}=$vtd_name;
 				last;
@@ -299,7 +299,7 @@ foreach my $uuid ( @uuid_list ) {
 	my $name="";
 	if ( $uuid =~ m/\s+name\s+=\s+"(\S+)"/m ) { $name=$1; }
 	if ( $uuid =~ m/\s+value\s+=\s+"(\S+)"/m ) { $unique_id=$1; }
-	if ( $name ne "" && $unique_id ne "" && defined $disks{$name} ) {
+	if ( $name ne "" and $unique_id ne "" and defined $disks{$name} ) {
 		$disks{$name}->{'unique_id'}=$unique_id;
 	}
 }
@@ -443,9 +443,9 @@ if ( $options{'disks'} ) {
 			$vfc{$vhost}->{'vio_adapter'},
 			defined $adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} ? $adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} : "-",
 			$vfc{$vhost}->{'lpar_number'},
-			( defined $vfc{$vhost}->{'lpar_name'} && $vfc{$vhost}->{'lpar_name'} ne "" ) ? $vfc{$vhost}->{'lpar_name'} : "-",
-			( defined $vfc{$vhost}->{'lpar_adapter'} && $vfc{$vhost}->{'lpar_adapter'} ne "" ) ? $vfc{$vhost}->{'lpar_adapter'} : "-",
-			( defined $vfc{$vhost}->{'lpar_slot'} && $vfc{$vhost}->{'lpar_slot'} ne "" ) ? $vfc{$vhost}->{'lpar_slot'} : "-",
+			( defined $vfc{$vhost}->{'lpar_name'} and $vfc{$vhost}->{'lpar_name'} ne "" ) ? $vfc{$vhost}->{'lpar_name'} : "-",
+			( defined $vfc{$vhost}->{'lpar_adapter'} and $vfc{$vhost}->{'lpar_adapter'} ne "" ) ? $vfc{$vhost}->{'lpar_adapter'} : "-",
+			( defined $vfc{$vhost}->{'lpar_slot'} and $vfc{$vhost}->{'lpar_slot'} ne "" ) ? $vfc{$vhost}->{'lpar_slot'} : "-",
 			$vfc{$vhost}->{'san_status'}
 		);
 	
