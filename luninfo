@@ -30,15 +30,18 @@
 #              added PowerHA 7 cluster repository disk detection (backup disks)
 # Version 1.16 IBM moved pcmpath to /usr/sbin, added detection to find both
 # Version 1.17 Fixed scsi id detection for mpioosdisks on 2145
+# Version 1.18 Relax regex for getting fc adapter firmware version
 
 use strict;
+use warnings;
+use 5.010; # because of //"", therefore this script will not run on AIX 5.3 with perl 5.6 anymore
 use IPC::Open2;
 use Getopt::Long;
 use List::Util qw( max );
 use XML::Simple; # for config file
 #use Data::Dumper;
 
-my $luninfo_version="1.17";
+my $luninfo_version="1.18";
 
 my $cfgfile="/etc/luninfo.cfg";
 
@@ -156,7 +159,7 @@ my %serials;	# serials, names and locations of managed systems
 my $cfg; #configuration hash
 
 # read locations and serials from config file only when necessary
-if ( $options{'ms'} || $options{'info'} || $options{'list'} ) {
+if ( $options{'ms'} or $options{'info'} or $options{'list'} ) {
 
 	
 	if ( -e $cfgfile ) {
@@ -322,7 +325,7 @@ sub get_all_pv_vg_sizes {
 						# size/1024 -> GiB
 						# if less than 1GiB, reduce decimal precision to 2
 						# same applies to disks out of GiB boundaries, like 1.5 GiB
-						$disks{$disk}->{'size'}=( $_ < 1024 || $_%1024 != 0 ) ? sprintf("%.2f",$_/1024) : $_/1024;
+						$disks{$disk}->{'size'}=( $_ < 1024 or $_%1024 != 0 ) ? sprintf("%.2f",$_/1024) : $_/1024;
 					} else {
 						$disks{$disk}->{'size'}=$_;
 					}
@@ -372,7 +375,8 @@ sub get_unique_ids {
 	}
 	for my $odmrecord (@odmdata){
 	        my @odmstanza = split "\n", $odmrecord; # list of lines in each stanza, including "CuAt" and empty lines
-		my $name=""; my $value="";
+		my $name="";
+		my $value="";
 		for my $line (@odmstanza){
 			if ($line =~ /\s+name\s+=\s+"(.*)"/) { $name = $1; }
 			if ($line =~ /\s+value\s+=\s+"(.*)"/) { $value = $1; }
@@ -424,7 +428,7 @@ sub get_all_lun_params {
 				# SVC disks
 				# 3321360050768019081CFD800000000000A8404214503IBMfcp
 				# IBM storage WWN always start with 6005076
-				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'} =~ /^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
 					$disks{$disk}->{'uuid'}=$1;
 					$disks{$disk}->{'box'}=$2;
 					$disks{$disk}->{'suid'}="$3:$4";
@@ -459,7 +463,7 @@ sub get_all_lun_params {
 			elsif (/vdisk/) { # vSCSI disks
 				# SVC LUNs visible through VIO
 				# 48333321360050768019081CFD8000000000009D804214503IBMfcp05VDASD03AIXvscsi
-				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
+				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
 					$disks{$disk}->{'uuid'}=$1;
 					$disks{$disk}->{'box'}=$2;
 					$disks{$disk}->{'suid'}="$3:$4";
@@ -467,7 +471,7 @@ sub get_all_lun_params {
 				}
 				# DS8000 family LUN visible through VIO
 				# 3520200B75CF371014A07210790003IBMfcp05VDASD03AIXvscsi"
-				elsif ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/........(.......)((..)(..))..2107900..IBMfcp..VDASD..AIXvscsi/ ) {
+				elsif ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/........(.......)((..)(..))..2107900..IBMfcp..VDASD..AIXvscsi/ ) {
 					$disks{$disk}->{'box'}=$1;
 					$disks{$disk}->{'uuid'}="$1_$2";
 					$disks{$disk}->{'suid'}="$3:$4";
@@ -480,7 +484,7 @@ sub get_all_lun_params {
 			elsif (/mpioosdisk/) { # generic AIX MPIO
 				# SVC LUNs visible directly via FC or NPIV but without SDDPCM
 				# 33213600507680180867968000000000006E804214503IBMfcp
-				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
 					$disks{$disk}->{'uuid'}=$1;
 					$disks{$disk}->{'box'}=$2;
 					$disks{$disk}->{'suid'}="$3:$4";
@@ -495,7 +499,7 @@ sub get_all_lun_params {
 				}
 				# DS8000 family LUN directly via FC or NPIV but without SDDPCM
 				# 3520200B75CF371014A07210790003IBMfcp
-				elsif ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/........(.......)((..)(..))..2107900..IBMfcp/ ) {
+				elsif ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/........(.......)((..)(..))..2107900..IBMfcp/ ) {
 					$disks{$disk}->{'box'}=$1;
 					$disks{$disk}->{'uuid'}="$1_$2";
 					$disks{$disk}->{'suid'}="$3:$4";
@@ -517,7 +521,7 @@ sub get_all_lun_params {
 
 				# tested with Hitachi VSP G200 without HDLM, just AIX MPIO
 				# 240C504138FE013006OPEN-V07HITACHIfcp
-				if ( defined $disks{$disk}->{'unique_id'} && $disks{$disk}->{'unique_id'}=~m/........(....)((..)(..))..OPEN-...HITACHIfcp/ ) {
+				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/........(....)((..)(..))..OPEN-...HITACHIfcp/ ) {
 					$disks{$disk}->{'box'}=$1;
 					$disks{$disk}->{'uuid'}="$1_$2";
 					$disks{$disk}->{'suid'}="$3:$4";
@@ -583,8 +587,9 @@ sub get_queuedepth_from_kernel {
 	foreach my $disk ( keys %disks ) {
 		$kdb_count++; $number_of_disks--;
 		$kdb_command .= "scsidisk $disk; ";
-		if ( $kdb_count == $parallel_kdb_queries || $number_of_disks == 0 ) {
-			my $disk_name=""; my $queuedepth="";
+		if ( $kdb_count == $parallel_kdb_queries or $number_of_disks == 0 ) {
+			my $disk_name="";
+			my $queuedepth="";
 			my $kdb_output=qx{ /usr/bin/echo "$kdb_command" | /usr/sbin/kdb -script };
 			my @paragraphs=split(/Executing\s+scsidisk\s+command/,$kdb_output);
 			foreach my $paragraph ( @paragraphs ) {
@@ -594,7 +599,7 @@ sub get_queuedepth_from_kernel {
 				if ( $paragraph =~ m/\s+ushort\s+queue_depth\s+=\s+0x([\da-f]+);/m) {
 					$queuedepth= hex( $1);
 				}
-				if ( $queuedepth ne "" && $disk_name ne "" ) {
+				if ( $queuedepth ne "" and $disk_name ne "" ) {
 					$disks{$disk_name}->{'queue_depth_kernel'}=$queuedepth;
 					$queuedepth=""; $disk_name="";
 				}
@@ -615,7 +620,8 @@ sub get_default_path_prio {
 	}
 	for my $odmrecord (@odmdata){
 	        my @odmstanza = split "\n", $odmrecord;
-		my $default=''; my $uniquetype='';
+		my $default='';
+		my $uniquetype='';
 		for my $line (@odmstanza){
 			if ($line =~ /\s+uniquetype\s+=\s+"(.*)"/) { $uniquetype = $1; }
 			if ($line =~ /\s+deflt\s+=\s+"(.*)"/) { $default = $1; }
@@ -655,7 +661,7 @@ sub get_all_path_info {
 		$paths{$disk}->{'id'}->{$path_id}->{'state'}=$state;		# save state of every path/adapter
 		$paths{$disk}->{'id'}->{$path_id}->{'select'}="-";		# defaults, to be overridden by sddpcm
 		$paths{$disk}->{'id'}->{$path_id}->{'errors'}="-";		# defaults, to be overridden by sddpcm
-		if ( defined $disks{$disk} && defined $disks{$disk}->{'PCM'} &&  defined $path_defaults{$disks{$disk}->{'PCM'}} ) { # because of autovivification
+		if ( defined $disks{$disk} and defined $disks{$disk}->{'PCM'} and  defined $path_defaults{$disks{$disk}->{'PCM'}} ) { # because of autovivification
 			# set default prio of every disk when available
 			$paths{$disk}->{'id'}->{$path_id}->{'prio'}=$path_defaults{$disks{$disk}->{'PCM'}};
 		}
@@ -676,7 +682,9 @@ sub get_all_path_prio {
 	}
 	for my $odmrecord (@odmdata){
 	        my @odmstanza = split "\n", $odmrecord;
-		my $disk=""; my $path_id=""; my $value="";
+		my $disk="";
+		my $path_id="";
+		my $value="";
 		for my $line (@odmstanza){
 			if ($line =~ /\s+name\s+=\s+"(.*)"/) { $disk = $1; }
 			if ($line =~ /\s+path_id\s+=\s+(.*)/) { $path_id = $1; }
@@ -699,7 +707,8 @@ sub get_all_sdd_path_prio {
 			  # e.g. after sddpcm upgrade without reboot
 	
 		my $line_no = 0;
-		my $devname=""; my @path_info=();
+		my $devname="";
+		my @path_info=();
 		foreach my $entry ( split ( /^DEV#:\s+\S+\s+|^Path#.*Errors\s*\n/m, $pcmpath_data ) ) {
 			next if not $line_no++;	# remove first block of junk
 			# there are 2 types of entries: device name and paths
@@ -762,30 +771,23 @@ if ( $options{'list'} ) {
 }
 # option -i
 elsif ( $options{'info'} ) {
-	get_all_disk_devs;
-	get_all_pv_vg_sizes;
-	get_unique_ids;
-	get_all_lun_params;
-	get_all_path_info;
+	get_all_disk_devs();
+	get_all_pv_vg_sizes();
+	get_unique_ids();
+	get_all_lun_params();
+	get_all_path_info();
 
 	# use dynamic widths for some columns
 	# calculate various max lengths
 	# always apply minimum sizes just in case there are no elements so the header can be displayed correctly
 	#my $max_disk_len=(sort { $b <=> $a } map { length($_) } map( $disks{$_}->{'name'}, keys %disks))[0];
-	my $max_disk_len=max(map length($_->{'name'}||0), values %disks);
-	$max_disk_len++; # add one more space for visibility
-	if ( $max_disk_len<5 ) { $max_disk_len=5; } # min size
-	my $max_size_len=max(map length($_->{'size'}), values %disks);
-	if ( $max_size_len<4 ) { $max_size_len=4; } # min size
+	my $max_disk_len=max(5, map length($_->{'name'}//""), values %disks); # min size 5
+	my $max_size_len=max(4, map length($_->{'size'}), values %disks);
 	#my $max_loc_len=max(map { length($_||0) } map( $locations{$disks{$_}->{'box'}}, keys %disks));
-	my $max_loc_len=max(map { length($locations{$_->{'box'}}||0)} values %disks);
-	if ( $max_loc_len<3 ) { $max_loc_len=3; } # min size
-	my $max_box_len=max(map length($_->{'box'}||0), values %disks);
-	if ( $max_box_len<3 ) { $max_box_len=3; } # min size
-	my $max_vg_len=max(map length($_->{'vg_name'}||0), values %disks);
-	if ( $max_vg_len<3 ) { $max_vg_len=3; } # min size
-	my $max_vg_state_len=max(map length($_->{'vg_state'}||0), values %disks);
-	if ( $max_vg_state_len<7 ) { $max_vg_state_len=7; } # min size, VGSTATE header is 7 chars long
+	my $max_loc_len=max(3, map { length($locations{$_->{'box'}}//"")} values %disks);
+	my $max_box_len=max(3, map length($_->{'box'}//""), values %disks);
+	my $max_vg_len=max(3, map length($_->{'vg_name'}//""), values %disks);
+	my $max_vg_state_len=max(7, map length($_->{'vg_state'}//""), values %disks); # min size, VGSTATE header is 7 chars long
 
 	# print the disk summary
 	if ( $options{'long'} ) {
@@ -825,20 +827,20 @@ elsif ( $options{'info'} ) {
 		foreach my $disk ( sort device_numerically keys %disks) {
 			printf("%-*s %*s %-*s %*s %34s %5s %4s %2s/%-2s %10s %-16s %-*s %*s %6s %-8s\n",
 				$max_disk_len, $disks{$disk}->{'name'},
-				$max_size_len, defined $disks{$disk}->{'size'} ? $disks{$disk}->{'size'} : "none",
-				$max_loc_len, defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "-",
+				$max_size_len, $disks{$disk}->{'size'} // "none",
+				$max_loc_len, $locations{$disks{$disk}->{'box'}} // "-",
 				$max_box_len, $disks{$disk}->{'box'},
 				$disks{$disk}->{'uuid'},
 				$disks{$disk}->{'suid'},
-				defined $disks{$disk}->{'scsi_id'} ? $disks{$disk}->{'scsi_id'} : "-",
+				$disks{$disk}->{'scsi_id'} // "-",
 				$paths{$disk}->{'enabled'},
 				$paths{$disk}->{'count'},
 				$disks{$disk}->{'status'},
-				defined $disks{$disk}->{'pvid'} ? $disks{$disk}->{'pvid'} : "none",
-				$max_vg_len, defined $disks{$disk}->{'vg_name'} ? $disks{$disk}->{'vg_name'} : "-",
+				$disks{$disk}->{'pvid'} // "none",
+				$max_vg_len, $disks{$disk}->{'vg_name'} // "-",
 				$max_vg_state_len, defined $disks{$disk}->{'vg_state'} ? substr($disks{$disk}->{'vg_state'},0,6) : "-", # compatibility with old luninfo
 				$disks{$disk}->{'box_type'},
-				defined $disks{$disk}->{'mirror_pool'}?$disks{$disk}->{'mirror_pool'}:"none"
+				$disks{$disk}->{'mirror_pool'} // "none"
 				);
 		}
 	} else { # plain option -i
@@ -861,16 +863,16 @@ elsif ( $options{'info'} ) {
 		foreach my $disk ( sort device_numerically keys %disks) {
 			printf("%-*s %*s %-*s %*s %5s %4s %2s/%-2s %10s %-16s %-*s %*s %6s\n",
 				$max_disk_len, $disks{$disk}->{'name'},
-				$max_size_len, defined $disks{$disk}->{'size'} ? $disks{$disk}->{'size'} : "none",
-				$max_loc_len, defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "-",
+				$max_size_len, $disks{$disk}->{'size'} // "none",
+				$max_loc_len, $locations{$disks{$disk}->{'box'}} // "-",
 				$max_box_len, $disks{$disk}->{'box'},
 				$disks{$disk}->{'suid'},
-				defined $disks{$disk}->{'scsi_id'} ? $disks{$disk}->{'scsi_id'} : "-",
+				$disks{$disk}->{'scsi_id'} // "-",
 				$paths{$disk}->{'enabled'},
 				$paths{$disk}->{'count'},
 				$disks{$disk}->{'status'},
-				defined $disks{$disk}->{'pvid'} ? $disks{$disk}->{'pvid'} : "none",
-				$max_vg_len, defined $disks{$disk}->{'vg_name'} ? $disks{$disk}->{'vg_name'} : "-",
+				$disks{$disk}->{'pvid'} // "none",
+				$max_vg_len, $disks{$disk}->{'vg_name'} // "-",
 				$max_vg_state_len, defined $disks{$disk}->{'vg_state'} ? substr($disks{$disk}->{'vg_state'},0,6) : "-", # compatibility with old luninfo
 				$disks{$disk}->{'box_type'}
 				);
@@ -881,9 +883,9 @@ elsif ( $options{'info'} ) {
 } elsif ( $options{'disks'} ) {
 	# option -d
 
-	get_all_disk_devs;
-	get_all_lun_params;
-	get_all_path_info;
+	get_all_disk_devs();
+	get_all_lun_params();
+	get_all_path_info();
 	
 	if ( $options{'long'} ) {
 		get_queuedepth_from_kernel;
@@ -895,17 +897,17 @@ elsif ( $options{'info'} ) {
 			printf("%-9s %3s %3s %3s %2s/%-2s %-6s %-17s %-12s %-13s %-9s %-9s %-8s\n",
 				$disks{$disk}->{'name'},
 				$disks{$disk}->{'queue_depth'},
-				defined $disks{$disk}->{'queue_depth_kernel'} ? $disks{$disk}->{'queue_depth_kernel'} : "-",
-				defined $disks{$disk}->{'rw_timeout'} ? $disks{$disk}->{'rw_timeout'} : "-",
+				$disks{$disk}->{'queue_depth_kernel'} // "-",
+				$disks{$disk}->{'rw_timeout'} // "-",
 				$paths{$disk}->{'enabled'},
 				$paths{$disk}->{'count'},
 				($paths{$disk}->{'enabled'} == $paths{$disk}->{'count'}) ? "OK" : "NOT_OK",
-				defined $disks{$disk}->{'algorithm'} ? $disks{$disk}->{'algorithm'} : "-",
-				defined $disks{$disk}->{'reserve_policy'} ? $disks{$disk}->{'reserve_policy'} : "-",
-				defined $disks{$disk}->{'hcheck_cmd'} ? $disks{$disk}->{'hcheck_cmd'} : "-",
-				defined $disks{$disk}->{'hcheck_interval'} ? $disks{$disk}->{'hcheck_interval'} : "-",
-				defined $disks{$disk}->{'hcheck_mode'} ? $disks{$disk}->{'hcheck_mode'} : "-",
-				defined $disks{$disk}->{'PR_key_value'} ? $disks{$disk}->{'PR_key_value'} : "-"
+				$disks{$disk}->{'algorithm'} // "-",
+				$disks{$disk}->{'reserve_policy'} // "-",
+				$disks{$disk}->{'hcheck_cmd'} // "-",
+				$disks{$disk}->{'hcheck_interval'} // "-",
+				$disks{$disk}->{'hcheck_mode'} // "-",
+				$disks{$disk}->{'PR_key_value'} // "-"
 				);
 			}
 	} else {
@@ -917,16 +919,16 @@ elsif ( $options{'info'} ) {
 			printf("%-9s %3s %3s %2s/%-2s %-6s %-17s %-12s %-13s %-9s %-9s %-8s\n",
 				$disks{$disk}->{'name'},
 				$disks{$disk}->{'queue_depth'},
-				defined $disks{$disk}->{'rw_timeout'} ? $disks{$disk}->{'rw_timeout'} : "-",
+				$disks{$disk}->{'rw_timeout'} // "-",
 				$paths{$disk}->{'enabled'},
 				$paths{$disk}->{'count'},
 				($paths{$disk}->{'enabled'} == $paths{$disk}->{'count'}) ? "OK" : "NOT_OK",
-				defined $disks{$disk}->{'algorithm'} ? $disks{$disk}->{'algorithm'} : "-",
-				defined $disks{$disk}->{'reserve_policy'} ? $disks{$disk}->{'reserve_policy'} : "-",
-				defined $disks{$disk}->{'hcheck_cmd'} ? $disks{$disk}->{'hcheck_cmd'} : "-",
-				defined $disks{$disk}->{'hcheck_interval'} ? $disks{$disk}->{'hcheck_interval'} : "-",
-				defined $disks{$disk}->{'hcheck_mode'} ? $disks{$disk}->{'hcheck_mode'} : "-",
-				defined $disks{$disk}->{'PR_key_value'} ? $disks{$disk}->{'PR_key_value'} : "-"
+				$disks{$disk}->{'algorithm'} // "-",
+				$disks{$disk}->{'reserve_policy'} // "-",
+				$disks{$disk}->{'hcheck_cmd'} // "-",
+				$disks{$disk}->{'hcheck_interval'} // "-",
+				$disks{$disk}->{'hcheck_mode'} // "-",
+				$disks{$disk}->{'PR_key_value'} // "-"
 				);
 		}
 	}
@@ -966,11 +968,11 @@ elsif ( $options{'info'} ) {
 			$system{'systemid'},
 			# just in case we are on a machine with "weird" lsmcode output -> print sys0 data
 			defined $system{'active_firmware'} ? $system{'active_firmware'} : $system{'fwversion'},
-			defined $system{'temporary_firmware'} ? $system{'temporary_firmware'} : "-",
-			defined $system{'permanent_firmware'} ? $system{'permanent_firmware'} : "-",
-			( defined $serials{$system{'systemid'}}->{"name"} and length $serials{$system{'systemid'}}->{"name"} ) ? $serials{$system{'systemid'}}->{"name"} : "UNKNOWN",
-			( defined $serials{$system{'systemid'}}->{"location"} and length $serials{$system{'systemid'}}->{"location"} ) ? $serials{$system{'systemid'}}->{"location"} : "UNKNOWN",
-			( defined $serials{$system{'systemid'}}->{"rack"} and length($serials{$system{'systemid'}}->{"rack"}) ) ? $serials{$system{'systemid'}}->{"rack"} : "-"
+			$system{'temporary_firmware'} // "-",
+			$system{'permanent_firmware'} // "-",
+			$serials{$system{'systemid'}}->{"name"} // "UNKNOWN",
+			$serials{$system{'systemid'}}->{"location"} // "UNKNOWN",
+			($serials{$system{'systemid'}}->{"rack"}) // "-"
 			);
 	} else {
 		if ( ! $options{'noheader'} ) { # option -H
@@ -981,7 +983,7 @@ elsif ( $options{'info'} ) {
 			$system{'systemid'},
 			# just in case we are on a machine with "weird" lsmcode output -> print sys0 data
 			defined $system{'active_firmware'} ? $system{'active_firmware'} : $system{'fwversion'},
-			defined $serials{$system{'systemid'}} ? $serials{$system{'systemid'}}->{"name"} : "UNKNOWN"
+			$serials{$system{'systemid'}}->{'name'} // "UNKNOWN"
 			);
 
 	}
@@ -1036,7 +1038,7 @@ elsif ( $options{'fscsi'} ) {
 				if ( /\s+Customer Card ID Number\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1; }
 				if ( /\s+Device Specific\.\(CC\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1; } # historic
 				if ( /\s+Feature Code\/Marketing ID\.+\s*(\S+)/ ) { $adapters{$adapter}->{'card_id'}=$1; } # historic
-				if ( /\s+Device Specific\.\(Z9\)\.+\s*..(\S+)/ )  { $adapters{$adapter}->{'firmware'}=$1; }
+				if ( /\s+Device Specific\.\(Z9\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'firmware'}=$1; }
 				
 			}
 			close(CMD1);
@@ -1126,7 +1128,7 @@ elsif ( $options{'fscsi'} ) {
 				my $sdd_state=$2; # FAILED, DEGRAD, NORMAL
 				# now find associated fcs device
 				foreach my $adapter ( keys %adapters ) {
-					if ( defined $adapters{$adapter}->{'device'} && $adapters{$adapter}->{'device'} eq $pdev ) {
+					if ( defined $adapters{$adapter}->{'device'} and $adapters{$adapter}->{'device'} eq $pdev ) {
 						$adapters{$adapter}->{'sdd_state'}=$sdd_state;
 					}
 				}
@@ -1140,18 +1142,12 @@ elsif ( $options{'fscsi'} ) {
 	# use dynamic widths for some columns
 	# calculate various max lengths
 	# always apply minimum sizes just in case there are no elements so the header can be displayed correctly
-	my $max_loc_len=max(map length($_->{'hw_path'}||0), values %adapters);
-	if ( $max_loc_len<8 ) { $max_loc_len=8; } # min size
-	my $max_err_recv_len=max(map length($_->{'fc_err_recov'}||0), values %adapters);
-	if ( $max_err_recv_len<10 ) { $max_err_recv_len=10; } # min size
-	my $max_fw_len=max(map length($_->{'firmware'}||0), values %adapters);
-	if ( $max_fw_len<4 ) { $max_fw_len=4; } # min size
-	my $max_fru_len=max(map length($_->{'fru_number'}||0), values %adapters);
-	if ( $max_fru_len<4 ) { $max_fru_len=4; } # min size
-	my $max_pn_len=max(map length($_->{'part_number'}||0), values %adapters);
-	if ( $max_pn_len<4 ) { $max_pn_len=4; } # min size
-	my $max_fc_len=max(map length($_->{'card_id'}||0), values %adapters);
-	if ( $max_fc_len<4 ) { $max_fc_len=4; } # min size
+	my $max_loc_len=max(8, map length($_->{'hw_path'}//""), values %adapters); # min size 8
+	my $max_err_recv_len=max(10, map length($_->{'fc_err_recov'}//""), values %adapters);
+	my $max_fw_len=max(4, map length($_->{'firmware'}//""), values %adapters);
+	my $max_fru_len=max(4, map length($_->{'fru_number'}//""), values %adapters);
+	my $max_pn_len=max(4, map length($_->{'part_number'}//""), values %adapters);
+	my $max_fc_len=max(4, map length($_->{'card_id'}//""), values %adapters);
 
 	# print FC hba status
 	if ( $options{'long'} ) { # option -l
@@ -1180,19 +1176,19 @@ elsif ( $options{'fscsi'} ) {
 			printf("%-5s %-9s %-6s %-6s %4s %5s %-*s %-*s %-*s %-*s %-*s %-16s %-7s %-6s %-*s %9s %-6s\n",
 				$adapters{$adapter}->{'name'},
 				$adapters{$adapter}->{'status'},
-				defined $adapters{$adapter}->{'sdd_state'} ? $adapters{$adapter}->{'sdd_state'} : "-",
-				defined $adapters{$adapter}->{'attach'} ? $adapters{$adapter}->{'attach'} : "UNKN",
-				defined $adapters{$adapter}->{'linkstate'} ? $adapters{$adapter}->{'linkstate'} : "UNKN",
-				defined $adapters{$adapter}->{'linkspeed'} ? $adapters{$adapter}->{'linkspeed'} : "-",
+				$adapters{$adapter}->{'sdd_state'} // "-",
+				$adapters{$adapter}->{'attach'} // "UNKN",
+				$adapters{$adapter}->{'linkstate'} // "UNKN",
+				$adapters{$adapter}->{'linkspeed'} // "-",
 				$max_loc_len, $adapters{$adapter}->{'hw_path'},
-				$max_fw_len, defined $adapters{$adapter}->{'firmware'} ? $adapters{$adapter}->{'firmware'} : "UNKN",
-				$max_fru_len, defined $adapters{$adapter}->{'fru_number'} ? $adapters{$adapter}->{'fru_number'} : "UNKN",
-				$max_pn_len, defined $adapters{$adapter}->{'part_number'} ? $adapters{$adapter}->{'part_number'} : "UNKN",
-				$max_fc_len, defined $adapters{$adapter}->{'card_id'} ? $adapters{$adapter}->{'card_id'} : "-",
-				defined $adapters{$adapter}->{'wwpn'} ? $adapters{$adapter}->{'wwpn'} : "-",
-				( defined $adapters{$adapter}->{'device'} and length $adapters{$adapter}->{'device'} ) ? $adapters{$adapter}->{'device'} : "UNKN",
-				defined $adapters{$adapter}->{'dyntrk'} ? $adapters{$adapter}->{'dyntrk'} : "-",
-				$max_err_recv_len, defined $adapters{$adapter}->{'fc_err_recov'} ? $adapters{$adapter}->{'fc_err_recov'} : "-",
+				$max_fw_len, $adapters{$adapter}->{'firmware'} // "UNKN",
+				$max_fru_len, $adapters{$adapter}->{'fru_number'} // "UNKN",
+				$max_pn_len, $adapters{$adapter}->{'part_number'} // "UNKN",
+				$max_fc_len, $adapters{$adapter}->{'card_id'} // "-",
+				$adapters{$adapter}->{'wwpn'} // "-",
+				$adapters{$adapter}->{'device'} // "UNKN",
+				$adapters{$adapter}->{'dyntrk'} // "-",
+				$max_err_recv_len, $adapters{$adapter}->{'fc_err_recov'} // "-",
 				$adapters{$adapter}->{'max_xfer_size'},
 				$adapters{$adapter}->{'num_cmd_elems'}
 				);
@@ -1219,15 +1215,15 @@ elsif ( $options{'fscsi'} ) {
 			printf("%-5s %-9s %-6s %-6s %4s %5s %-*s %-16s %-7s %-6s %-*s %9s %-6s\n",
 				$adapters{$adapter}->{'name'},
 				$adapters{$adapter}->{'status'},
-				defined $adapters{$adapter}->{'sdd_state'} ? $adapters{$adapter}->{'sdd_state'} : "-",
-				defined $adapters{$adapter}->{'attach'} ? $adapters{$adapter}->{'attach'} : "UNKN",
-				defined $adapters{$adapter}->{'linkstate'} ? $adapters{$adapter}->{'linkstate'} : "UNKN",
-				defined $adapters{$adapter}->{'linkspeed'} ? $adapters{$adapter}->{'linkspeed'} : "-",
+				$adapters{$adapter}->{'sdd_state'} // "-",
+				$adapters{$adapter}->{'attach'} // "UNKN",
+				$adapters{$adapter}->{'linkstate'} // "UNKN",
+				$adapters{$adapter}->{'linkspeed'} // "-",
 				$max_loc_len, $adapters{$adapter}->{'hw_path'},
-				defined $adapters{$adapter}->{'wwpn'} ? $adapters{$adapter}->{'wwpn'} : "-",
-				( defined $adapters{$adapter}->{'device'} and length $adapters{$adapter}->{'device'} ) ? $adapters{$adapter}->{'device'} : "UNKN",
-				defined $adapters{$adapter}->{'dyntrk'} ? $adapters{$adapter}->{'dyntrk'} : "-",
-				$max_err_recv_len, defined $adapters{$adapter}->{'fc_err_recov'} ? $adapters{$adapter}->{'fc_err_recov'} : "-",
+				$adapters{$adapter}->{'wwpn'} // "-",
+				$adapters{$adapter}->{'device'} // "UNKN",
+				$adapters{$adapter}->{'dyntrk'} // "-",
+				$max_err_recv_len, $adapters{$adapter}->{'fc_err_recov'} // "-",
 				$adapters{$adapter}->{'max_xfer_size'},
 				$adapters{$adapter}->{'num_cmd_elems'}
 				);
@@ -1375,7 +1371,7 @@ elsif ( $options{'virtual'} ) {
 			close(CMDIN);
 		}
 
-		if ( $lke ne "" && $le_data ne "" ) {
+		if ( $lke ne "" and $le_data ne "" ) {
 			my $pid=open2(\*CMDIN, \*CMDOUT, "/usr/sbin/kdb -script");
 			print CMDOUT "vfcsglob\n$le_data\n";
 			close(CMDOUT);
@@ -1427,19 +1423,19 @@ elsif ( $options{'virtual'} ) {
 			$adapters{$adapter}->{'controller'},
 			$adapters{$adapter}->{'vios'},
 			$adapters{$adapter}->{'vhost'},
-			defined $adapters{$adapter}->{'vscsi_err_recov'} ? $adapters{$adapter}->{'vscsi_err_recov'} : "-", # not present in early 5.3
-			defined $adapters{$adapter}->{'vscsi_path_to'} ? $adapters{$adapter}->{'vscsi_path_to'} : "-"
+			$adapters{$adapter}->{'vscsi_err_recov'} // "-", # not present in early 5.3
+			$adapters{$adapter}->{'vscsi_path_to'} // "-"
 			);
 	}
 } elsif ( $options{'paths'} ) {
 
 	# option -p
-	get_all_disk_devs;
-	get_all_lun_params; # because of PCM option to find default prio
-	get_default_path_prio;
-	get_all_path_info;
-	get_all_path_prio;
-	get_all_sdd_path_prio;
+	get_all_disk_devs();
+	get_all_lun_params(); # because of PCM option to find default prio
+	get_default_path_prio();
+	get_all_path_info();
+	get_all_path_prio();
+	get_all_sdd_path_prio();
 
 	#print Data::Dumper->Dump([\%disks]);
 	#print Data::Dumper->Dump([\%path_defaults]);
