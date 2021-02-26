@@ -68,18 +68,19 @@ sub usage {
 
 }
 
-my %options = ( 'ms' => 0,
-	'disks' => 0,
-	'fscsi' => 0,
+my %options = (
+	'ms'       => 0,
+	'disks'    => 0,
+	'fscsi'    => 0,
 	'gigabyte' => 0,
-	'info' => 0,	# default option used when no other option is present
-	'virtual' => 0,
-	'paths' => 0,
-	'long' => 0,
+	'info'     => 0,	# default option used when no other option is present
+	'virtual'  => 0,
+	'paths'    => 0,
+	'long'     => 0,
 	'noheader' => 0,
-	'version' => 0,
-	'list' => 0,
-	'help' => 0
+	'version'  => 0,
+	'list'     => 0,
+	'help'     => 0
 );
 
 my %option_constraints = (
@@ -156,7 +157,7 @@ if ( $options{'version'} ) {
 
 my %locations;	# storage box locations
 my %serials;	# serials, names and locations of managed systems
-my $cfg; #configuration hash
+my $cfg;	# configuration hash, contains serial numbers and managed system names
 
 # read locations and serials from config file only when necessary
 if ( $options{'ms'} or $options{'info'} or $options{'list'} ) {
@@ -378,8 +379,8 @@ sub get_unique_ids {
 		my $name="";
 		my $value="";
 		for my $line (@odmstanza){
-			if ($line =~ /\s+name\s+=\s+"(.*)"/) { $name = $1; }
-			if ($line =~ /\s+value\s+=\s+"(.*)"/) { $value = $1; }
+			if ( $line =~ /\s+name\s+=\s+"(.*)"/  ) { $name = $1; }
+			if ( $line =~ /\s+value\s+=\s+"(.*)"/ ) { $value = $1; }
 		}
 		if ( defined $disks{$name} ) { # only set unique_id if the disk is already known
 			$disks{$name}->{'unique_id'}=$value;
@@ -388,6 +389,85 @@ sub get_unique_ids {
 	#print Data::Dumper->Dump([\%disks]);
 }
 
+# identify various disks from unique_id
+sub identify_2145 {
+	my $disksref = shift;
+	my $d = shift;
+
+	# SVC disks:
+	# 3321360050768019081CFD800000000000A8404214503IBMfcp
+	# SVC LUNs visible directly via FC or NPIV but without SDDPCM:
+	# 33213600507680180867968000000000006E804214503IBMfcp
+	# SVC LUNs visible through VIO:
+	# 48333321360050768019081CFD8000000000009D804214503IBMfcp05VDASD03AIXvscsi
+	# IBM storage WWN always start with 6005076
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+		$disksref->{$d}->{'uuid'}=$1;
+		$disksref->{$d}->{'box'}=$2;
+		$disksref->{$d}->{'suid'}="$3:$4";
+		$disksref->{$d}->{'box_type'}="2145";
+
+	# This should work from AIX 5.3 upwards for 2145
+	# This might work for DS5000 (type 1818) too, although I don't have a machine to test with
+	# lun_id is never defined for vscsi devices, that's because this works for FC/NPIC *and* vscsi
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
+		return 1; # true
+	}
+	return 0; # false
+}
+
+sub identify_2107 {
+	my $disksref = shift;
+	my $d = shift;
+
+	# DS8000 family LUN
+	# 200B75G6831015607210790003IBMfcp
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~m/^....(.......)((..)(..))..2107900..IBMfcp/ ) {
+		$disksref->{$d}->{'box'}=$1;
+		$disksref->{$d}->{'uuid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
+		$disksref->{$d}->{'suid'}="$3:$4";
+		$disksref->{$d}->{'box_type'}="2107";
+		# There is a lun_id for DS8000 too, but this contains the same info as $3$4 (0x40XX40XX00000000)
+		$disksref->{$d}->{'scsi_id'}="-";
+
+		return 1; # true
+	}
+	return 0; # false
+}
+
+# identify Hitachi VSP GX00 disks
+sub identify_htc_vsp_gx00 {
+	my $disksref = shift;
+	my $d = shift;
+
+	# may also work with Hitachi boxes that use those disk types:
+	#         htc9900mpio
+	#         htchusvmmpio
+	#         htcuspmpio
+	#         htcuspvmpio
+	#         htcvspg1000mpio
+	#         htcvspmpio
+
+	# tested with Hitachi VSP G200 without HDLM, just AIX MPIO
+	# 240C504138FE013006OPEN-V07HITACHIfcp
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~ m/........(....)((..)(..))..OPEN-...HITACHIfcp/ ) {
+		$disksref->{$d}->{'box'}=$1;
+		$disksref->{$d}->{'uuid'}="$1_$2";
+		$disksref->{$d}->{'suid'}="$3:$4";
+		$disksref->{$d}->{'box_type'}="HTC";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
+		return 1; # true
+	}
+	return 0; # false
+}
 
 # option -i, -d, -p (only because of PCM)
 # read disk parameters of all disks, mostly -d, because of lun_id -> also -c
@@ -395,16 +475,16 @@ sub get_all_lun_params {
 	foreach my $disk ( keys %disks ) {
 		open(CMD,"/usr/sbin/lsattr -El $disk|") or die "Error running /usr/sbin/lsattr -El $disk !\n";
 		while(<CMD>) {
-			if ( /^PCM\s+(\S+)/)              { $disks{$disk}->{'PCM'}=$1; } # needed to get default path prio later
+			if ( /^PCM\s+(\S+)/)              { $disks{$disk}->{'PCM'}=$1;             } # needed to get default path prio later
 			if ( /^hcheck_interval\s+(\S+)/ ) { $disks{$disk}->{'hcheck_interval'}=$1; }
-			if ( /^hcheck_mode\s+(\S+)/ )     { $disks{$disk}->{'hcheck_mode'}=$1; }
-			if ( /^hcheck_cmd\s+(\S+)/ )      { $disks{$disk}->{'hcheck_cmd'}=$1; } # only with vscsi
-			if ( /^queue_depth\s+(\S+)/ )     { $disks{$disk}->{'queue_depth'}=$1; }
-			if ( /^lun_id\s+(\S+)/ )          { $disks{$disk}->{'lun_id'}=$1; } # only for some physical disks (e.g. 2145, 1818..)
-			if ( /^rw_timeout\s+(\S+)/ )      { $disks{$disk}->{'rw_timeout'}=$1; } # not on vscsi
-			if ( /^reserve_policy\s+(\S+)/ )  { $disks{$disk}->{'reserve_policy'}=$1; }
-			if ( /^PR_key_value\s+(\S+)/ )    { $disks{$disk}->{'PR_key_value'}=$1; }
-			if ( /^algorithm\s+(\S+)/ )       { $disks{$disk}->{'algorithm'}=$1; }
+			if ( /^hcheck_mode\s+(\S+)/ )     { $disks{$disk}->{'hcheck_mode'}=$1;     }
+			if ( /^hcheck_cmd\s+(\S+)/ )      { $disks{$disk}->{'hcheck_cmd'}=$1;      } # only with vscsi
+			if ( /^queue_depth\s+(\S+)/ )     { $disks{$disk}->{'queue_depth'}=$1;     }
+			if ( /^lun_id\s+(\S+)/ )          { $disks{$disk}->{'lun_id'}=$1;          } # only for some physical disks (e.g. 2145, 1818..)
+			if ( /^rw_timeout\s+(\S+)/ )      { $disks{$disk}->{'rw_timeout'}=$1;      } # not on vscsi
+			if ( /^reserve_policy\s+(\S+)/ )  { $disks{$disk}->{'reserve_policy'}=$1;  }
+			if ( /^PR_key_value\s+(\S+)/ )    { $disks{$disk}->{'PR_key_value'}=$1;    }
+			if ( /^algorithm\s+(\S+)/ )       { $disks{$disk}->{'algorithm'}=$1;       }
 		}
 		close(CMD);
 
@@ -423,36 +503,13 @@ sub get_all_lun_params {
 			#1815    - 1815 devices (DS 4800)
 			#1818    - 1818 devices (DS 5000)
 	
-			# or vscsi, scsd
+			# or vscsi, scsd...
+
 			if (/2145/) {
-				# SVC disks
-				# 3321360050768019081CFD800000000000A8404214503IBMfcp
-				# IBM storage WWN always start with 6005076
-				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
-					$disks{$disk}->{'uuid'}=$1;
-					$disks{$disk}->{'box'}=$2;
-					$disks{$disk}->{'suid'}="$3:$4";
-					$disks{$disk}->{'box_type'}="2145";
-				}
-				# This should work from AIX 5.3 upwards for 2145
-				# This might work for DS5000 (type 1818) too, although I don't have a machine to test with
-				if ( defined $disks{$disk}->{'lun_id'} ) {
-					if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
-						$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
-						# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
-					}
-				}
+				identify_2145(\%disks, $disk);
 			}
 			elsif (/2107/) {
-				# DS8000 family LUN
-				# 200B75G6831015607210790003IBMfcp
-				$disks{$disk}->{'unique_id'}=~m/^....(.......)((..)(..))..2107900..IBMfcp/;
-				$disks{$disk}->{'box'}=$1;
-				$disks{$disk}->{'uuid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
-				$disks{$disk}->{'suid'}="$3:$4";
-				$disks{$disk}->{'box_type'}="2107";
-				# There is a lun_id for DS8000 too, but this contains the same info as $3$4 (0x40XX40XX00000000)
-				$disks{$disk}->{'scsi_id'}="-"
+				identify_2107(\%disks, $disk);
 			}
 			#elsif (/1814/) {
 				# there is no unique_id on DS4800 type boxes, but a ieee_volname (e.g. 600A0B800011FA78000035D648C5DBA1)
@@ -461,78 +518,21 @@ sub get_all_lun_params {
 				# on vscsi lpars, the ieee_volname is inside uniqe_id: 3520600A0B800011FA78000035D648C5DBA105VDASD03AIXvscsi
 			#}
 			elsif (/vdisk/) { # vSCSI disks
-				# SVC LUNs visible through VIO
-				# 48333321360050768019081CFD8000000000009D804214503IBMfcp05VDASD03AIXvscsi
-				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
-					$disks{$disk}->{'uuid'}=$1;
-					$disks{$disk}->{'box'}=$2;
-					$disks{$disk}->{'suid'}="$3:$4";
-					$disks{$disk}->{'box_type'}="2145";
-				}
-				# DS8000 family LUN visible through VIO
-				# 3520200B75CF371014A07210790003IBMfcp05VDASD03AIXvscsi"
-				elsif ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/........(.......)((..)(..))..2107900..IBMfcp..VDASD..AIXvscsi/ ) {
-					$disks{$disk}->{'box'}=$1;
-					$disks{$disk}->{'uuid'}="$1_$2";
-					$disks{$disk}->{'suid'}="$3:$4";
-					$disks{$disk}->{'box_type'}="2107";
-				}
+				identify_2145(\%disks, $disk) or
+				identify_2107(\%disks, $disk);
+
 				# we don't know a method to get the real scsi-id of vscsi devices, set it to "-"
 				$disks{$disk}{'scsi_id'}="-"
 			
 			}
 			elsif (/mpioosdisk/) { # generic AIX MPIO
-				# SVC LUNs visible directly via FC or NPIV but without SDDPCM
-				# 33213600507680180867968000000000006E804214503IBMfcp
-				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
-					$disks{$disk}->{'uuid'}=$1;
-					$disks{$disk}->{'box'}=$2;
-					$disks{$disk}->{'suid'}="$3:$4";
-					$disks{$disk}->{'box_type'}="2145";
-
-					if ( defined $disks{$disk}->{'lun_id'} ) {
-						if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
-							$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
-							# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
-						}
-					}
-				}
-				# DS8000 family LUN directly via FC or NPIV but without SDDPCM
-				# 3520200B75CF371014A07210790003IBMfcp
-				elsif ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/........(.......)((..)(..))..2107900..IBMfcp/ ) {
-					$disks{$disk}->{'box'}=$1;
-					$disks{$disk}->{'uuid'}="$1_$2";
-					$disks{$disk}->{'suid'}="$3:$4";
-					$disks{$disk}->{'box_type'}="2107";
-
-					# we don't know a method to get the real scsi-id here too, so set it to "-"
-					$disks{$disk}{'scsi_id'}="-"
-				}
+				identify_2145(\%disks, $disk) or
+				identify_2107(\%disks, $disk);
 			
 			}
 			elsif (/htcvspgx00mpio/) { # Hitachi VSP GX00 MPIO
-				# may also work with Hitachi boxes that use those disk types:
-				#         htc9900mpio
-				#         htchusvmmpio
-				#         htcuspmpio
-				#         htcuspvmpio
-				#         htcvspg1000mpio
-				#         htcvspmpio
+				identify_htc_vsp_gx00(\%disks, $disk);
 
-				# tested with Hitachi VSP G200 without HDLM, just AIX MPIO
-				# 240C504138FE013006OPEN-V07HITACHIfcp
-				if ( defined $disks{$disk}->{'unique_id'} and $disks{$disk}->{'unique_id'}=~ m/........(....)((..)(..))..OPEN-...HITACHIfcp/ ) {
-					$disks{$disk}->{'box'}=$1;
-					$disks{$disk}->{'uuid'}="$1_$2";
-					$disks{$disk}->{'suid'}="$3:$4";
-					$disks{$disk}->{'box_type'}="HTC";
-				}
-				if ( defined $disks{$disk}->{'lun_id'} ) {
-					if ( $disks{$disk}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
-						$disks{$disk}->{'scsi_id'}= defined $1 ? hex($1):0;
-						# m/0x([\da-f]+)\b/; scsi_id = hex ($1) >> 48 works only with 64 bit perl! sigh
-					}
-				}
 			}
 			elsif (/scsd/) { # parallel or serial SCSI disk (subclass would be scsi and sas)
 				delete $disks{$disk}; # we are not interested in those -> remove from hash
@@ -550,6 +550,7 @@ sub get_all_lun_params {
 
 # option -d
 # get effective queue_depth value for each disk from kernel
+
 # old function, replaced with a faster one. Problems: See below!
 #sub get_queuedepth_from_kernel {
 #	foreach my $disk ( sort keys %disks ) {
@@ -623,8 +624,8 @@ sub get_default_path_prio {
 		my $default='';
 		my $uniquetype='';
 		for my $line (@odmstanza){
-			if ($line =~ /\s+uniquetype\s+=\s+"(.*)"/) { $uniquetype = $1; }
-			if ($line =~ /\s+deflt\s+=\s+"(.*)"/) { $default = $1; }
+			if ( $line =~ /\s+uniquetype\s+=\s+"(.*)"/ ) { $uniquetype = $1; }
+			if ( $line =~ /\s+deflt\s+=\s+"(.*)"/      ) { $default = $1; }
 		}
 		if ( $uniquetype ne '' ) { $path_defaults{$uniquetype}=$default; }
 	}
@@ -640,16 +641,16 @@ sub get_all_path_info {
 		chomp;
 		# Enabled hdisk2 vscsi0 810000000000 Available 0
 		my ($state, $disk, $adapter, $connection, $path_status, $path_id)=m/(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/;
-		next if ($disk =~m/^ses/);      # ignore SAS enclosures
+		next if ( $disk =~m/^ses/ );	# ignore SAS enclosures
 	
 		$paths{$disk}->{'id'}->{$path_id}->{'path_status'}=$path_status;
 		$paths{$disk}->{'id'}->{$path_id}->{'connection'}=$connection;	# currently unused, contains SCSI-ID for each path
 										# might be useful later
 	
-		# set defaults to 0
-		if ( not defined $paths{$disk}->{'count'} ) { $paths{$disk}->{'count'}=0; }
-		if ( not defined $paths{$disk}->{'enabled'} ) { $paths{$disk}->{'enabled'}=0; }
-		if ( not defined $paths{$disk}->{'not_enabled'} ) { $paths{$disk}->{'not_enabled'}=0; }
+		# set defaults to 0 when undefined
+		$paths{$disk}->{'count'}       //= 0;
+		$paths{$disk}->{'enabled'}     //= 0;
+		$paths{$disk}->{'not_enabled'} //= 0;
 		$paths{$disk}->{'count'}+=1;			# count paths
 	
 		if ( $state ne "Enabled" ) {
@@ -686,9 +687,9 @@ sub get_all_path_prio {
 		my $path_id="";
 		my $value="";
 		for my $line (@odmstanza){
-			if ($line =~ /\s+name\s+=\s+"(.*)"/) { $disk = $1; }
-			if ($line =~ /\s+path_id\s+=\s+(.*)/) { $path_id = $1; }
-			if ($line =~ /\s+value\s+=\s+"(.*)"/) { $value = $1; }
+			if ( $line =~ /\s+name\s+=\s+"(.*)"/  ) { $disk = $1;    }
+			if ( $line =~ /\s+path_id\s+=\s+(.*)/ ) { $path_id = $1; }
+			if ( $line =~ /\s+value\s+=\s+"(.*)"/ ) { $value = $1;   }
 		}
 			if ( defined $paths{$disk} ) {
 				$paths{$disk}->{'id'}->{$path_id}->{'prio'}=$value;
@@ -742,7 +743,7 @@ if ( $options{'list'} ) {
 	foreach my $location ( sort keys %{$cfg->{'location'}} ) {
 		printf("DC %s comment %s\n",
 			$location,
-			defined $cfg->{'location'}->{$location}->{'comment'} && length($cfg->{'location'}->{$location}->{'comment'}) >0 ? $cfg->{'location'}->{$location}->{'comment'}:"-"
+			( defined $cfg->{'location'}->{$location}->{'comment'} and length($cfg->{'location'}->{$location}->{'comment'}) >0 ) ? $cfg->{'location'}->{$location}->{'comment'}:"-"
 		);
 		foreach my $element ( reverse sort keys %{$cfg->{'location'}->{$location}} ) {
 			for ( $element) {
@@ -750,7 +751,7 @@ if ( $options{'list'} ) {
 					foreach my $box ( sort keys %{$cfg->{'location'}->{$location}->{$element}} ) {
 						printf(" storage box %s comment %s\n",
 							$box,
-							defined $cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'} && length($cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'}) >0 ? $cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'}:"-"
+							( defined $cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'} and length($cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'}) >0 ) ? $cfg->{'location'}->{$location}->{$element}->{$box}->{'comment'}:"-"
 						);
 					}
 						
@@ -760,7 +761,7 @@ if ( $options{'list'} ) {
 						defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'ms-name'}?$cfg->{'location'}->{$location}->{$element}->{$ms}->{'ms-name'}:"UNKNOWN",
 						$ms,
 						defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'rack'}?$cfg->{'location'}->{$location}->{$element}->{$ms}->{'rack'}:"-",
-						defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'} && length($cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'}) >0 ? $cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'}:"-"
+						( defined $cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'} and length($cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'}) >0 ) ? $cfg->{'location'}->{$location}->{$element}->{$ms}->{'comment'}:"-"
 						);
 					}
 				}
@@ -1031,14 +1032,14 @@ elsif ( $options{'fscsi'} ) {
 	#        Hardware Location Code......U78AB.001.WZSGDZK-P1-C4-T1
 			open(CMD1,"/usr/sbin/lscfg -vl $adapter|") or die "Error running /usr/sbin/lscfg -vl $adapter !\n";
 			while(<CMD1>) {
-				if ( /\s+$adapter\s+(\S+)/ )                      { $adapters{$adapter}->{'hw_path'}=$1; }
-				if ( /\s+FRU Number\.+\s*(\S+)/ )                 { $adapters{$adapter}->{'fru_number'}=$1; }
-				if ( /\s+Network Address\.+\s*(\S+)/ )            { $adapters{$adapter}->{'wwpn'}=$1; }
+				if ( /\s+$adapter\s+(\S+)/ )                      { $adapters{$adapter}->{'hw_path'}=$1;     }
+				if ( /\s+FRU Number\.+\s*(\S+)/ )                 { $adapters{$adapter}->{'fru_number'}=$1;  }
+				if ( /\s+Network Address\.+\s*(\S+)/ )            { $adapters{$adapter}->{'wwpn'}=$1;        }
 				if ( /\s+Part Number\.+\s*(\S+)/ )                { $adapters{$adapter}->{'part_number'}=$1; }
-				if ( /\s+Customer Card ID Number\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1; }
-				if ( /\s+Device Specific\.\(CC\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1; } # historic
-				if ( /\s+Feature Code\/Marketing ID\.+\s*(\S+)/ ) { $adapters{$adapter}->{'card_id'}=$1; } # historic
-				if ( /\s+Device Specific\.\(Z9\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'firmware'}=$1; }
+				if ( /\s+Customer Card ID Number\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1;     }
+				if ( /\s+Device Specific\.\(CC\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'card_id'}=$1;     } # historic
+				if ( /\s+Feature Code\/Marketing ID\.+\s*(\S+)/ ) { $adapters{$adapter}->{'card_id'}=$1;     } # historic
+				if ( /\s+Device Specific\.\(Z9\)\.+\s*(\S+)/ )    { $adapters{$adapter}->{'firmware'}=$1;    }
 				
 			}
 			close(CMD1);
@@ -1061,8 +1062,8 @@ elsif ( $options{'fscsi'} ) {
 			if ( $device ne "" ) { # device is empty when fcsX is Defined
 				open(CMD1,"/usr/sbin/lsattr -El $device|");
 				while(<CMD1>) {
-					if ( /^attach\s+(\S+)/ )       { $adapters{$adapter}->{'attach'}=$1; } # needed when no devscan is available
-					if ( /^dyntrk\s+(\S+)/ )       { $adapters{$adapter}->{'dyntrk'}=$1; }
+					if ( /^attach\s+(\S+)/ )       { $adapters{$adapter}->{'attach'}=$1;       } # needed when no devscan is available
+					if ( /^dyntrk\s+(\S+)/ )       { $adapters{$adapter}->{'dyntrk'}=$1;       }
 					if ( /^fc_err_recov\s+(\S+)/ ) { $adapters{$adapter}->{'fc_err_recov'}=$1; }
 				}
 				close(CMD1);
@@ -1093,10 +1094,9 @@ elsif ( $options{'fscsi'} ) {
 		open(CMD,"/usr/bin/fcstat -d $adapter 2>/dev/null|") or die "Error running /usr/bin/fcstat -d $adapter!\n";
 		while(<CMD>) {
 			chomp;
-			if ( /Port Speed \(running\):\s+(\d+)\s+GBIT/ ) { $adapters{$adapter}->{'linkspeed'}= $1; }
-			#if ( /Port Type:\s+(\S+)/ ) { $adapters{$adapter}->{'attach'}= lc($1); } # "Fabric" or "Private Loop"
-			if ( /Attention\s+Type:\s+Link\s+(\S+)/ )       { $adapters{$adapter}->{'linkstate'}= lc($1); }
-			if ( /^World Wide Port Name:\s0x(\S+)/ ) { $adapters{$adapter}->{'wwpn'}=$1; }
+			if ( /Port Speed \(running\):\s+(\d+)\s+GBIT/ ) { $adapters{$adapter}->{'linkspeed'}= $1;     }
+			if ( /Attention\s+Type:\s+Link\s+(\S+)/       ) { $adapters{$adapter}->{'linkstate'}= lc($1); }
+			if ( /^World Wide Port Name:\s0x(\S+)/        ) { $adapters{$adapter}->{'wwpn'}=$1;           }
 		}
 		close(CMD);	# only close will set $? ! :-)
 		my $rc=$? >> 8;
@@ -1104,10 +1104,9 @@ elsif ( $options{'fscsi'} ) {
 			open(CMD,"/usr/bin/fcstat -D $adapter 2>/dev/null|") or die "Error running /usr/bin/fcstat -D $adapter!\n";
 			while(<CMD>) {
 				chomp;
-				if ( /Port Speed \(running\):\s+(\d+)\s+GBIT/ ) { $adapters{$adapter}->{'linkspeed'}= $1; }
-				#if ( /Port Type:\s+(\S+)/ ) { $adapters{$adapter}->{'attach'}= lc($1); } # "Fabric" or "Private Loop"
-				if ( /Attention\s+Type:\s+Link\s+(\S+)/ )       { $adapters{$adapter}->{'linkstate'}= lc($1); }
-				if ( /^World Wide Port Name:\s0x(\S+)/ ) { $adapters{$adapter}->{'wwpn'}=$1; }
+				if ( /Port Speed \(running\):\s+(\d+)\s+GBIT/ ) { $adapters{$adapter}->{'linkspeed'}= $1;     }
+				if ( /Attention\s+Type:\s+Link\s+(\S+)/       ) { $adapters{$adapter}->{'linkstate'}= lc($1); }
+				if ( /^World Wide Port Name:\s0x(\S+)/        ) { $adapters{$adapter}->{'wwpn'}=$1;           }
 			}
 			close(CMD);
 		}
@@ -1250,7 +1249,7 @@ elsif ( $options{'virtual'} ) {
 			open(CMD1,"/usr/sbin/lsattr -El $adapter|");
 			while(<CMD1>) {
 				if ( /^vscsi_err_recov\s+(\S+)/ ) { $adapters{$adapter}->{'vscsi_err_recov'}=$1; }
-				if ( /^vscsi_path_to\s+(\S+)/ )   { $adapters{$adapter}->{'vscsi_path_to'}=$1; }
+				if ( /^vscsi_path_to\s+(\S+)/   ) { $adapters{$adapter}->{'vscsi_path_to'}=$1; }
 			}
 			close(CMD1);
 	

@@ -16,7 +16,8 @@
 #
 
 use strict;
-#use warnings;
+use warnings;
+use 5.010; # because of //
 use Getopt::Long;
 use XML::Simple; # for config file
 #use Data::Dumper;
@@ -174,7 +175,7 @@ my $kdb_command=$initial_kdb_command;
 foreach my $vhost ( keys %vscsi ) {
 	$kdb_count++; $number_of_vhosts--;
 	$kdb_command .= "svva $vhost; ";
-	if ( $kdb_count == $parallel_kdb_queries || $number_of_vhosts == 0 ) {
+	if ( $kdb_count == $parallel_kdb_queries or $number_of_vhosts == 0 ) {
 		my $vhost_name=""; my $lpar_name=""; my $lpar_number="";
 		open(CMD,"echo \"$kdb_command\" \|/usr/sbin/kdb -script|" ) or die "Error running /usr/sbin/kdb -script !\n";
 		while(<CMD>) {
@@ -308,6 +309,74 @@ undef @uuid_list;
 #print Data::Dumper->Dump([\%disks]);
 #print Data::Dumper->Dump([\%vscsi]);
 
+# identify various disks from unique_id
+sub identify_2145 {
+	my $disksref = shift;
+	my $d = shift;
+
+	# SVC disks:
+	# 3321360050768019081CFD800000000000A8404214503IBMfcp
+	# SVC LUNs visible directly via FC or NPIV but without SDDPCM:
+	# 33213600507680180867968000000000006E804214503IBMfcp
+	# SVC LUNs visible through VIO:
+	# 48333321360050768019081CFD8000000000009D804214503IBMfcp05VDASD03AIXvscsi
+	# IBM storage WWN always start with 6005076
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
+		$disksref->{$d}->{'uuid'}=$1;
+		$disksref->{$d}->{'box'}=$2;
+		$disksref->{$d}->{'suid'}="$3:$4";
+		$disksref->{$d}->{'box_type'}="2145";
+
+	# This should work from AIX 5.3 upwards for 2145
+	# This might work for DS5000 (type 1818) too, although I don't have a machine to test with
+		return 1; # true
+	}
+	return 0; # false
+}
+
+sub identify_2107 {
+	my $disksref = shift;
+	my $d = shift;
+
+	# DS8000 family LUN
+	# 200B75G6831015607210790003IBMfcp
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~m/^....(.......)((..)(..))..2107900..IBMfcp/ ) {
+		$disksref->{$d}->{'box'}=$1;
+		$disksref->{$d}->{'uuid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
+		$disksref->{$d}->{'suid'}="$3:$4";
+		$disksref->{$d}->{'box_type'}="2107";
+		# There is a lun_id for DS8000 too, but this contains the same info as $3$4 (0x40XX40XX00000000)
+
+		return 1; # true
+	}
+return 0; # false
+}
+
+# identify Hitachi VSP GX00 disks
+sub identify_htc_vsp_gx00 {
+	my $disksref = shift;
+	my $d = shift;
+
+	# may also work with Hitachi boxes that use those disk types:
+	#         htc9900mpio
+	#         htchusvmmpio
+	#         htcuspmpio
+	#         htcuspvmpio
+	#         htcvspg1000mpio
+	#         htcvspmpio
+
+	# tested with Hitachi VSP G200 without HDLM, just AIX MPIO
+	# 240C504138FE013006OPEN-V07HITACHIfcp
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~ m/........(....)((..)(..))..OPEN-...HITACHIfcp/ ) {
+		$disksref->{$d}->{'box'}=$1;
+		$disksref->{$d}->{'uuid'}="$1_$2";
+		$disksref->{$d}->{'suid'}="$3:$4";
+		$disksref->{$d}->{'box_type'}="HTC";
+		return 1; # true
+	}
+	return 0; # false
+}
+
 # copy & paste from luninfo, few lines removed (like lun_id and scsi_id stuff)
 foreach my $disk ( keys %disks ) {
 	# use type and subclass to separate disks
@@ -325,44 +394,32 @@ foreach my $disk ( keys %disks ) {
 		#1818    - 1818 devices (DS 5000)
 
 		if (/2145/) {
-			# 3321360050768019081CFD800000000000A8404214503IBMfcp
-			# IBM storage WWN always start with 6005076
-			if ( $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp/ ) {
-				$disks{$disk}->{'guid'}=$1;
-				$disks{$disk}->{'box'}=$2;
-				$disks{$disk}->{'suid'}="$3:$4";
-				$disks{$disk}->{'box_type'}="2145";
-			}
+			identify_2145(\%disks, $disk);
+
 		}
 		elsif (/2107/) {
-			# 200B75G6831015607210790003IBMfcp
-			if ( $disks{$disk}->{'unique_id'} =~ m/^....(.......)((..)(..))..2107.....IBMfcp/ ) {
-				$disks{$disk}{'box'}=$1;
-				$disks{$disk}{'guid'}="$1_$2"; # this is normally $2 ONLY, but we don't print the box
-				#undef $disks{$name}; # we don't care about 2107 disks
-				$disks{$disk}{'suid'}="$3:$4";
-				$disks{$disk}->{'box_type'}="2107";
-			}
+			identify_2107(\%disks, $disk);
+
 		}
 		elsif (/vdisk/) {
+			identify_2145(\%disks, $disk) or
+			identify_2107(\%disks, $disk);
 
-			if ( $disks{$disk}->{'unique_id'} =~ m/^\S+(6005076......(.....)..........(..)(..))..2145..IBMfcp..VDASD..AIXvscsi/ ) {
-				$disks{$disk}{'guid'}=$1;
-				$disks{$disk}{'box'}=$2;
-				$disks{$disk}{'suid'}="$3:$4";
-				$disks{$disk}->{'box_type'}="2145";
-			}
-			# 3520200B75CF371014A07210790003IBMfcp05VDASD03AIXvscsi"
-			elsif ( $disks{$disk}->{'unique_id'} =~ m/........(.......)((..)(..))..2107.....IBMfcp..VDASD..AIXvscsi/ ) {
-				$disks{$disk}{'box'}=$1;
-				$disks{$disk}{'guid'}="$1_$2";
-				$disks{$disk}{'suid'}="$3:$4";
-				#undef $disks{$disk}; # we don't care about 2107 disks
-			}
-		
+		}
+		elsif (/mpioosdisk/) { # generic AIX MPIO
+			identify_2145(\%disks, $disk) or
+			identify_2107(\%disks, $disk);
+
+		}
+		elsif (/htcvspgx00mpio/) { # Hitachi VSP GX00 MPIO
+			identify_htc_vsp_gx00(\%disks, $disk);
+
 		}
 		elsif (/scsd/) { # parallel or serial SCSI disk (subclass would be scsi and sas)
 			delete $disks{$disk}; # we are not interested in those -> remove from hash
+		}
+		elsif (/sisarray/) { # SAS RAID arrays
+			delete $disks{$disk}; # we are (currently) not interested in those -> remove from hash
 		} else {
 			print STDERR "Unknown disk type $disks{$disk}{'type'} for disk $disk found!\n";
 			undef $disks{$disk};
@@ -389,13 +446,13 @@ if ( $options{'disks'} ) {
 					$vscsi{$vhost}->{'name'},
 					$vscsi{$vhost}->{'status'},
 					$vscsi{$vhost}->{'slot'},
-					defined $vscsi{$vhost}->{'lpar_number'} ? $vscsi{$vhost}->{'lpar_number'} : "-",
-					defined $vscsi{$vhost}->{'lpar_name'} ? $vscsi{$vhost}->{'lpar_name'} : "-",
+					$vscsi{$vhost}->{'lpar_number'} // "-",
+					$vscsi{$vhost}->{'lpar_name'} // "-",
 					$disk,
 					$vscsi{$vhost}->{'disks'}->{$disk},
-					defined $locations{$disks{$disk}->{'box'}} ? $locations{$disks{$disk}->{'box'}} : "UNKN",
-					defined $disks{$disk}->{'box'} ? $disks{$disk}->{'box'} : "UNKN",
-					defined $disks{$disk}->{'suid'} ? $disks{$disk}->{'suid'} : "-"
+					$locations{$disks{$disk}->{'box'}} // "UNKN",
+					$disks{$disk}->{'box'} // "UNKN",
+					$disks{$disk}->{'suid'} // "-"
 				);
 			}
 		} else { # empty vhost
@@ -403,8 +460,8 @@ if ( $options{'disks'} ) {
 					$vscsi{$vhost}->{'name'},
 					$vscsi{$vhost}->{'status'},
 					$vscsi{$vhost}->{'slot'},
-					defined $vscsi{$vhost}->{'lpar_number'} ? $vscsi{$vhost}->{'lpar_number'} : "-",
-					defined $vscsi{$vhost}->{'lpar_name'} ? $vscsi{$vhost}->{'lpar_name'} : "-",
+					$vscsi{$vhost}->{'lpar_number'} // "-",
+					$vscsi{$vhost}->{'lpar_name'} // "-",
 					'none',
 					'none',
 					'-',
@@ -441,11 +498,11 @@ if ( $options{'disks'} ) {
 			$vfc{$vhost}->{'status'},
 			$vfc{$vhost}->{'slot'},
 			$vfc{$vhost}->{'vio_adapter'},
-			defined $adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} ? $adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} : "-",
+			$adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} // "-",
 			$vfc{$vhost}->{'lpar_number'},
-			( defined $vfc{$vhost}->{'lpar_name'} and $vfc{$vhost}->{'lpar_name'} ne "" ) ? $vfc{$vhost}->{'lpar_name'} : "-",
-			( defined $vfc{$vhost}->{'lpar_adapter'} and $vfc{$vhost}->{'lpar_adapter'} ne "" ) ? $vfc{$vhost}->{'lpar_adapter'} : "-",
-			( defined $vfc{$vhost}->{'lpar_slot'} and $vfc{$vhost}->{'lpar_slot'} ne "" ) ? $vfc{$vhost}->{'lpar_slot'} : "-",
+			$vfc{$vhost}->{'lpar_name'} // "-",
+			$vfc{$vhost}->{'lpar_adapter'} // "-",
+			$vfc{$vhost}->{'lpar_slot'} // "-",
 			$vfc{$vhost}->{'san_status'}
 		);
 	
