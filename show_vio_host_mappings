@@ -377,6 +377,35 @@ sub identify_htc_vsp_gx00 {
 	return 0; # false
 }
 
+# identify Purestorage disks
+sub identify_purestorage {
+	my $disksref = shift;
+	my $d = shift;
+
+	#         puredisk
+
+	# tested with Purestorage, box type unknown
+	# 3A213624A93708D4089CD6DB5405A000113E70AFlashArray04PUREfcp
+	# Important: The box or array id does not change when a lun is moved later on to another box! Take care!
+	# see https://www.codyhosterman.com/2016/01/vmfs-snapshots-and-the-flasharray-part-iv-how-to-correlate-a-vmfs-to-a-flasharray-volume/
+	# and https://www.codyhosterman.com/2018/02/volume-matching-via-the-api-in-purity-5-0/
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~ m/.....624A9370((................)(........))..FlashArray04PUREfcp/ ) {
+		$disksref->{$d}->{'box'}=$2; # ????
+		$disksref->{$d}->{'uuid'}="$1";
+		my $tmpsuid=$3;
+		$tmpsuid=~ s/^0+//g;	# remove leading zeros
+		$disksref->{$d}->{'suid'}="$tmpsuid";
+		$disksref->{$d}->{'box_type'}="PURE";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
+		return 1; # true
+	}
+	return 0; # false
+}
+
 # copy & paste from luninfo, few lines removed (like lun_id and scsi_id stuff)
 foreach my $disk ( keys %disks ) {
 	# use type and subclass to separate disks
@@ -401,13 +430,19 @@ foreach my $disk ( keys %disks ) {
 			identify_2107(\%disks, $disk);
 
 		}
+		elsif (/puredisk/) {
+			identify_purestorage(\%disks, $disk);
+
+		}
 		elsif (/vdisk/) {
 			identify_2145(\%disks, $disk) or
+			identify_purestorage(\%disks, $disk) or
 			identify_2107(\%disks, $disk);
 
 		}
 		elsif (/mpioosdisk/) { # generic AIX MPIO
 			identify_2145(\%disks, $disk) or
+			identify_purestorage(\%disks, $disk) or
 			identify_2107(\%disks, $disk);
 
 		}
@@ -433,8 +468,11 @@ foreach my $disk ( keys %disks ) {
 # -d
 if ( $options{'disks'} ) {
 
+	my $max_box_len=max(3, map length($_->{'box'}//""), values %disks);
+	my $max_uid_len=max(5, map length($_->{'suid'}//""), values %disks);
+
 	if ( ! $options{'noheader'} ) { # option -H
-		printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-7s %-5s\n",
+		printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-*s %-*s\n",
 			"#ADAPTER","STATE","SLOT","LPARID","LPAR","HDISK","VTD","LOC","BOX","UID");
 	}
 	# only vscsi vhosts have luns associated
@@ -442,7 +480,7 @@ if ( $options{'disks'} ) {
 		# do we have disks connected to this vhost?
 		if ( scalar ( keys %{$vscsi{$vhost}->{'disks'}}) != 0 ) {
 			foreach my $disk ( keys %{$vscsi{$vhost}->{'disks'}} ) {
-				printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-7s %-5s\n",
+				printf("%-9s %-9s %-4s %6s %-10s %-8s %-16s %-5s %-*s %-*s\n",
 					$vscsi{$vhost}->{'name'},
 					$vscsi{$vhost}->{'status'},
 					$vscsi{$vhost}->{'slot'},
@@ -451,8 +489,8 @@ if ( $options{'disks'} ) {
 					$disk,
 					$vscsi{$vhost}->{'disks'}->{$disk},
 					$locations{$disks{$disk}->{'box'}} // "UNKN",
-					$disks{$disk}->{'box'} // "UNKN",
-					$disks{$disk}->{'suid'} // "-"
+					$max_box_len, $disks{$disk}->{'box'} // "UNKN",
+					$max_uid_len, $disks{$disk}->{'suid'} // "-"
 				);
 			}
 		} else { # empty vhost

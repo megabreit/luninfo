@@ -27,6 +27,7 @@ use strict;
 use warnings;
 use 5.010; # because if //
 #use Data::Dumper;
+use List::Util qw( max );
 use XML::Simple; # for config file
 
 my %disks;
@@ -279,6 +280,35 @@ sub identify_htc_vsp_gx00 {
 	return 0; # false
 }
 
+# identify Purestorage disks
+sub identify_purestorage {
+	my $disksref = shift;
+	my $d = shift;
+
+	#         puredisk
+
+	# tested with Purestorage, box type unknown
+	# 3A213624A93708D4089CD6DB5405A000113E70AFlashArray04PUREfcp
+	# Important: The box or array id does not change when a lun is moved later on to another box! Take care!
+	# see https://www.codyhosterman.com/2016/01/vmfs-snapshots-and-the-flasharray-part-iv-how-to-correlate-a-vmfs-to-a-flasharray-volume/
+	# and https://www.codyhosterman.com/2018/02/volume-matching-via-the-api-in-purity-5-0/
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~ m/.....624A9370((................)(........))..FlashArray04PUREfcp/ ) {
+		$disksref->{$d}->{'box'}=$2; # ????
+		$disksref->{$d}->{'uuid'}="$1";
+		my $tmpsuid=$3;
+		$tmpsuid=~ s/^0+//g;	# remove leading zeros
+		$disksref->{$d}->{'suid'}="$tmpsuid";
+		$disksref->{$d}->{'box_type'}="PURE";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
+		return 1; # true
+	}
+	return 0; # false
+}
+
 # copy & paste from luninfo, few lines removed (like lun_id and scsi_id stuff)
 foreach my $disk ( keys %disks ) {
 	#open(CMD,"/usr/sbin/lsattr -El $disk|") or die "Error running /usr/sbin/lsattr -El $disk !\n";
@@ -309,13 +339,19 @@ foreach my $disk ( keys %disks ) {
 			identify_2107(\%disks, $disk);
 
 		}
+		elsif (/puredisk/) {
+			identify_purestorage(\%disks, $disk);
+
+		}
 		elsif (/vdisk/) {
 			identify_2145(\%disks, $disk) or
+			identify_purestorage(\%disks, $disk) or
 			identify_2107(\%disks, $disk);
 
 		}
 		elsif (/mpioosdisk/) { # generic AIX MPIO
 			identify_2145(\%disks, $disk) or
+			identify_purestorage(\%disks, $disk) or
 			identify_2107(\%disks, $disk);
 
 		}
@@ -388,20 +424,39 @@ sub disks_numerically {
 	my $bb=$1;
 	$aa <=> $bb;
 }
+
+# set dynamic width for some columns
+my $max_box_len=max(3, map length($_->{'box'}//""), values %disks);
+my $max_uuid_len=max(5, map length($_->{'uuid'}//""), values %disks);
+my $max_uid_len=max(5, map length($_->{'suid'}//""), values %disks);
+
 # print the whole thing
-printf("%-9s %32s %5s %8s %-8s %7s %4s %18s %-4s %8s %16s %12s %6s\n", "#DISK","UUID","SUID","SIZE","BOX","LOC","SCSI","PVID","SLOT","VHOST","VTD","LPAR","LPARID");
+printf("%-9s %*s %*s %8s %-*s %7s %4s %18s %-4s %8s %16s %12s %6s\n",
+			"#DISK",
+			$max_uuid_len,"UUID",
+			$max_uid_len,"SUID",
+			"SIZE",
+			$max_box_len,"BOX",
+			"LOC",
+			"SCSI",
+			"PVID",
+			"SLOT",
+			"VHOST",
+			"VTD",
+			"LPAR",
+			"LPARID");
 foreach my $disk ( sort disks_numerically keys %disks) {
 	# for now just look at available disk...
 	if ( defined $disks{$disk}->{'status'} and $disks{$disk}->{'status'} eq "Available" ) {
-		printf("%-9s %32s %5s %8s %-8s %7s %4s %18s %-4s %8s %16s %12s %6s\n",
+		printf("%-9s %*s %*s %8s %-*s %7s %4s %18s %-4s %8s %16s %12s %6s\n",
 			$disks{$disk}->{'name'},
-			$disks{$disk}->{'guid'},
-			$disks{$disk}->{'suid'},
-			$disks{$disk}->{'size'},
-			$disks{$disk}->{'box'},
+			$max_uuid_len, $disks{$disk}->{'uuid'} // "-",
+			$max_uid_len, $disks{$disk}->{'suid'} // "-",
+			$disks{$disk}->{'size'} // "-",
+			$max_box_len, $disks{$disk}->{'box'} // "-",
 			$locations{$disks{$disk}->{'box'}} // "UNKN",
-			$disks{$disk}->{'scsi_id'},
-			$disks{$disk}->{'pvid'},
+			$disks{$disk}->{'scsi_id'} // "-",
+			$disks{$disk}->{'pvid'} // "-",
 			$slots{$disks{$disk}->{'vhost'}} // "-",
 			$disks{$disk}->{'vhost'} // "-",
 			$disks{$disk}->{'vtd'} // "-",

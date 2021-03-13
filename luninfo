@@ -31,6 +31,7 @@
 # Version 1.16 IBM moved pcmpath to /usr/sbin, added detection to find both
 # Version 1.17 Fixed scsi id detection for mpioosdisks on 2145
 # Version 1.18 Relax regex for getting fc adapter firmware version
+# Version 1.19 added support for Purestorage Flash array
 
 use strict;
 use warnings;
@@ -41,7 +42,7 @@ use List::Util qw( max );
 use XML::Simple; # for config file
 #use Data::Dumper;
 
-my $luninfo_version="1.18";
+my $luninfo_version="1.19";
 
 my $cfgfile="/etc/luninfo.cfg";
 
@@ -469,6 +470,35 @@ sub identify_htc_vsp_gx00 {
 	return 0; # false
 }
 
+# identify Purestorage disks
+sub identify_purestorage {
+	my $disksref = shift;
+	my $d = shift;
+
+	#         puredisk
+
+	# tested with Purestorage, box type unknown
+	# 3A213624A93708D4089CD6DB5405A000113E70AFlashArray04PUREfcp
+	# Important: The box or array id does not change when a lun is moved later on to another box! Take care!
+	# see https://www.codyhosterman.com/2016/01/vmfs-snapshots-and-the-flasharray-part-iv-how-to-correlate-a-vmfs-to-a-flasharray-volume/
+	# and https://www.codyhosterman.com/2018/02/volume-matching-via-the-api-in-purity-5-0/
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~ m/.....624A9370((................)(........))..FlashArray04PUREfcp/ ) {
+		$disksref->{$d}->{'box'}=$2; # ????
+		$disksref->{$d}->{'uuid'}="$1";
+		my $tmpsuid=$3;
+		$tmpsuid=~ s/^0+//g;	# remove leading zeros
+		$disksref->{$d}->{'suid'}="$tmpsuid";
+		$disksref->{$d}->{'box_type'}="PURE";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
+		return 1; # true
+	}
+	return 0; # false
+}
+
 # option -i, -d, -p (only because of PCM)
 # read disk parameters of all disks, mostly -d, because of lun_id -> also -c
 sub get_all_lun_params {
@@ -511,6 +541,9 @@ sub get_all_lun_params {
 			elsif (/2107/) {
 				identify_2107(\%disks, $disk);
 			}
+			elsif (/puredisk/) {
+				identify_purestorage(\%disks, $disk);
+			}
 			#elsif (/1814/) {
 				# there is no unique_id on DS4800 type boxes, but a ieee_volname (e.g. 600A0B800011FA78000035D648C5DBA1)
 				# don't know how to get the box serial from ieee_volname
@@ -519,6 +552,7 @@ sub get_all_lun_params {
 			#}
 			elsif (/vdisk/) { # vSCSI disks
 				identify_2145(\%disks, $disk) or
+				identify_purestorage(\%disks, $disk) or
 				identify_2107(\%disks, $disk);
 
 				# we don't know a method to get the real scsi-id of vscsi devices, set it to "-"
@@ -527,6 +561,7 @@ sub get_all_lun_params {
 			}
 			elsif (/mpioosdisk/) { # generic AIX MPIO
 				identify_2145(\%disks, $disk) or
+				identify_purestorage(\%disks, $disk) or
 				identify_2107(\%disks, $disk);
 			
 			}
@@ -783,10 +818,12 @@ elsif ( $options{'info'} ) {
 	# always apply minimum sizes just in case there are no elements so the header can be displayed correctly
 	#my $max_disk_len=(sort { $b <=> $a } map { length($_) } map( $disks{$_}->{'name'}, keys %disks))[0];
 	my $max_disk_len=max(5, map length($_->{'name'}//""), values %disks); # min size 5
-	my $max_size_len=max(4, map length($_->{'size'}), values %disks);
+	my $max_size_len=max(4, map length($_->{'size'}//""), values %disks);
 	#my $max_loc_len=max(map { length($_||0) } map( $locations{$disks{$_}->{'box'}}, keys %disks));
 	my $max_loc_len=max(3, map { length($locations{$_->{'box'}}//"")} values %disks);
 	my $max_box_len=max(3, map length($_->{'box'}//""), values %disks);
+	my $max_uuid_len=max(5, map length($_->{'uuid'}//""), values %disks);
+	my $max_uid_len=max(5, map length($_->{'suid'}//""), values %disks);
 	my $max_vg_len=max(3, map length($_->{'vg_name'}//""), values %disks);
 	my $max_vg_state_len=max(7, map length($_->{'vg_state'}//""), values %disks); # min size, VGSTATE header is 7 chars long
 
@@ -808,13 +845,13 @@ elsif ( $options{'info'} ) {
 		#print Data::Dumper->Dump([\%disks]);
 	
 		if ( ! $options{'noheader'} ) { # option -H
-			printf("%-*s %*s %-*s %*s %34s %5s %4s %5s %10s %-16s %-*s %*s %6s %-8s\n",
+			printf("%-*s %*s %-*s %*s %*s %*s %4s %5s %10s %-16s %-*s %*s %6s %-8s\n",
 				$max_disk_len, "#DISK",
 				$max_size_len, "SIZE",
 				$max_loc_len, "LOC",
 				$max_box_len, "BOX",
-				"UUID",
-				"UID",
+				$max_uuid_len, "UUID",
+				$max_uid_len, "UID",
 				"SCSI",
 				"PATHS",
 				"STATE",
@@ -826,13 +863,13 @@ elsif ( $options{'info'} ) {
 				);
 		}
 		foreach my $disk ( sort device_numerically keys %disks) {
-			printf("%-*s %*s %-*s %*s %34s %5s %4s %2s/%-2s %10s %-16s %-*s %*s %6s %-8s\n",
+			printf("%-*s %*s %-*s %*s %*s %*s %4s %2s/%-2s %10s %-16s %-*s %*s %6s %-8s\n",
 				$max_disk_len, $disks{$disk}->{'name'},
 				$max_size_len, $disks{$disk}->{'size'} // "none",
 				$max_loc_len, $locations{$disks{$disk}->{'box'}} // "-",
 				$max_box_len, $disks{$disk}->{'box'},
-				$disks{$disk}->{'uuid'},
-				$disks{$disk}->{'suid'},
+				$max_uuid_len, $disks{$disk}->{'uuid'},
+				$max_uid_len, $disks{$disk}->{'suid'},
 				$disks{$disk}->{'scsi_id'} // "-",
 				$paths{$disk}->{'enabled'},
 				$paths{$disk}->{'count'},
@@ -846,12 +883,12 @@ elsif ( $options{'info'} ) {
 		}
 	} else { # plain option -i
 		if ( ! $options{'noheader'} ) { # option -H
-			printf("%-*s %*s %-*s %*s %5s %4s %5s %10s %-16s %-*s %*s %6s\n",
+			printf("%-*s %*s %-*s %*s %*s %4s %5s %10s %-16s %-*s %*s %6s\n",
 				$max_disk_len, "#DISK",
 				$max_size_len, "SIZE",
 				$max_loc_len, "LOC",
 				$max_box_len, "BOX",
-				"UID",
+				$max_uid_len, "UID",
 				"SCSI",
 				"PATHS",
 				"STATE",
@@ -862,12 +899,12 @@ elsif ( $options{'info'} ) {
 				);
 		}
 		foreach my $disk ( sort device_numerically keys %disks) {
-			printf("%-*s %*s %-*s %*s %5s %4s %2s/%-2s %10s %-16s %-*s %*s %6s\n",
+			printf("%-*s %*s %-*s %*s %*s %4s %2s/%-2s %10s %-16s %-*s %*s %6s\n",
 				$max_disk_len, $disks{$disk}->{'name'},
 				$max_size_len, $disks{$disk}->{'size'} // "none",
 				$max_loc_len, $locations{$disks{$disk}->{'box'}} // "-",
 				$max_box_len, $disks{$disk}->{'box'},
-				$disks{$disk}->{'suid'},
+				$max_uid_len, $disks{$disk}->{'suid'},
 				$disks{$disk}->{'scsi_id'} // "-",
 				$paths{$disk}->{'enabled'},
 				$paths{$disk}->{'count'},
