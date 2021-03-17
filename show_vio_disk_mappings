@@ -16,6 +16,7 @@
 # Version 2.2 2015-02-24 LPARID added, "support" for empty/defined vhosts or stopped LPARs
 # Version 2.3 2015-04-30 cosmetics: slot numbers left justified
 # Version 2.4 2020-11-07 moved serials and locations into luninfo.cfg
+# Version 2.5 2021-03-17 storage subs, added purestorage, codereview
 #
 # Bugs: Script might display garbage for LPAR and/or LPARID when executed while a lpar is booting
 #       there is no documentation on all possible kdb output :-(
@@ -229,6 +230,11 @@ sub identify_2145 {
 		$disksref->{$d}->{'box'}=$2;
 		$disksref->{$d}->{'suid'}="$3:$4";
 		$disksref->{$d}->{'box_type'}="2145";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
 
 	# This should work from AIX 5.3 upwards for 2145
 	# This might work for DS5000 (type 1818) too, although I don't have a machine to test with
@@ -275,6 +281,11 @@ sub identify_htc_vsp_gx00 {
 		$disksref->{$d}->{'uuid'}="$1_$2";
 		$disksref->{$d}->{'suid'}="$3:$4";
 		$disksref->{$d}->{'box_type'}="HTC";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
 		return 1; # true
 	}
 	return 0; # false
@@ -457,11 +468,11 @@ foreach my $disk ( sort disks_numerically keys %disks) {
 			$locations{$disks{$disk}->{'box'}} // "UNKN",
 			$disks{$disk}->{'scsi_id'} // "-",
 			$disks{$disk}->{'pvid'} // "-",
-			$slots{$disks{$disk}->{'vhost'}} // "-",
+			(defined $disks{$disk}->{'vhost'} and $slots{$disks{$disk}->{'vhost'}} ) ? $slots{$disks{$disk}->{'vhost'}} : "-",
 			$disks{$disk}->{'vhost'} // "-",
 			$disks{$disk}->{'vtd'} // "-",
-			$vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_name'} // "-",
-			$vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_number'} // "-"
+			(defined $disks{$disk}->{'vhost'} and $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_name'} ) ? $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_name'} : "-",
+			(defined $disks{$disk}->{'vhost'} and $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_number'} ) ? $vhost2lpar{$disks{$disk}->{'vhost'}}->{'lpar_number'} : "-"
 		);
 	}
 }
