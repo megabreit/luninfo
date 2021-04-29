@@ -53,6 +53,6 @@ Columns:
 | LHBA | Name of the virtual fibrechannel adapter inside the LPAR |
 | VSLOT | Virtual slot number of the virtual LPAR HBA as configured in the HMC profile |
 | LPARWWPN | Active LPAR WWPN, the inactive WWPN is only visible on the HMC! |
-| SAN | State of the virtual adapter |
+| SAN | State of the SAN connection of the virtual LPAR adapter (LOGGED_IN or NOT_LOGGED_IN) |
 
 TODO: Add some example to the -d option
