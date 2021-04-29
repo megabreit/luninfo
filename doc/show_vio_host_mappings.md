@@ -1,6 +1,6 @@
 # show_vio_host_mappings
 
-This script show the mappings of virtual fibrechannel or scsi adapters to AIX LPARs. It needs to be run on a VIOS server as root. padmin permissions are not sufficient.
+This script shows the mappings of virtual fibrechannel or scsi adapters to AIX LPARs. It needs to be run on a VIOS server as root. padmin permissions are not sufficient.
 
 This script can be used to check
 - if all necessary virtual host adapters are available. In usual setups there are at least 2 adapters, 1 for each SAN
