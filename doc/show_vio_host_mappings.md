@@ -38,7 +38,7 @@ vfchost15 Available C16  fcs2  100000109B1DC5EF      9 aixlpar08   fcs2  C16   C
 vfchost24 Available C23  -     -                    11 -           -     -     -                 NOT_LOGGED_IN
 vfchost25 Available C22  fcs2  100000109B1DC5EF     11 aixlpar09   fcs2  C16   C0507604F7C300E7      LOGGED_IN
 ```
-In this example vhost24 connected to LPAR 11 (aixlpar09) has a broken mapping.
+In this example vfchost24 connected to LPAR 11 (aixlpar09) has a broken mapping.
 
 Columns:
 | Name | Purpose |
