@@ -8,6 +8,7 @@
 # Version 1.2 removed unnecessary loop that caused bad performance
 # Version 1.3 2015-04-30 cosmetic changes, slot numbers are left justified now, ioscli APAR mentioned
 # Version 1.4 2020-11-07 added code to read luninfo.cfg, currently not used
+# Version 1.5 fixed more trimming issues, added client WWPNs from fcstat -client
 #
 # Bugs: Script might display garbage for LPAR and/or LPARID when executed while a lpar is booting
 #       there is no documentation on all possible kdb output :-(
@@ -94,6 +95,7 @@ while(<CMD>) {
         }
 
 }
+close(CMD);
 
 open(CMD,"/usr/sbin/lsdev -c adapter -t IBM,vfc-server -F'name status physloc'|") or die "Error running lsdev -c adapter -t IBM,vfc-server -F'name status physloc'!";
 while(<CMD>) {
@@ -108,6 +110,7 @@ while(<CMD>) {
         }
 
 }
+close(CMD);
 
 open(CMD,'/usr/sbin/lsdev -Cc adapter -F name:status:type|') or die "Error running /usr/sbin/lsdev -Cc adapter -F name:status:type !\n";
 while (<CMD>) {
@@ -149,6 +152,7 @@ while(<CMD>) {
 	$lpar_name =~ s/^\s+|\s+$//g; # trim spaces; f*ck IBM (empty entries are no empty strings but " " grrrr), IV86769 adds -fmt2, no trimming anymore
 	$lpar_adapter =~ s/^\s+|\s+$//g; # trim more spaces; same reason
 	$lpar_hw_path =~ s/^\s+|\s+$//g; # still triming
+	$vio_adapter =~ s/^\s+|\s+$//g; # still triming
 	$vfc{$vhost}->{'lpar_name'}=$lpar_name;
 	$vfc{$vhost}->{'lpar_number'}=$lpar_number;
 	$vfc{$vhost}->{'vio_adapter'}=$vio_adapter;
@@ -159,6 +163,29 @@ while(<CMD>) {
 		$vfc{$vhost}->{"lpar_slot"}=$1;
 	}
 }
+close(CMD);
+
+my %wwpns;
+# get LPAR WWPNs from fcstat
+# cd /tmp because ioscli generates ioscli.log in current work directory
+open(CMD,"cd /tmp; /usr/ios/cli/ioscli fcstat -client|") or die "Error running ioscli command\n";
+#              hostname   dev                wwpn     inreqs    outreqs ctrlreqs          inbytes         outbytes  DMA_errs Elem_errs Comm_errs 
+#
+#              vios      fcs0  0x100000109B1DC25C  312994017      31408  8125962   10754518493985       2740539392         0         0         0 
+#              axlpar1   fcs0  0xC0507604F7C30198  123132810   21987139   711500    3837994849924     331345608704         0         0         0 
+#              axlpar2   fcs0  0xC0507604F7C3013E    8282431    5157236  1863108     671551786965     328632340480         0         0         0 
+
+while(<CMD>) {
+	chomp;
+	my ( $start, $lpar_name, $dev, $wwpn, $rest)=split(/\s+/);
+	# ignore empty and non-relevant lines
+	next if ( ! defined $start or $dev eq "dev" );
+	$wwpn =~ s/0x//; # remove 0x from WWPN
+	$wwpns{$lpar_name}->{$dev}=$wwpn;
+}
+close(CMD);
+
+#print Data::Dumper->Dump([\%wwpns]);
 
 # get vhost to lpar mapping from kernel kdb... this takes some time! :-)
 # kdb queries are slow. let's query some info with the same kdb call (in "parallel"), 15 seems OK, 20 is NOT
@@ -512,8 +539,8 @@ if ( $options{'disks'} ) {
 # no option
 
 	if ( ! $options{'noheader'} ) { # option -H
-		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %14s\n",
-		"#ADAPTER","STATE","SLOT","HBA","WWPN","LPARID","LPAR","LHBA","VSLOT","SAN");
+		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %-16s %14s\n",
+		"#ADAPTER","STATE","SLOT","HBA","WWPN","LPARID","LPAR","LHBA","VSLOT","LPARWWPN","SAN");
 	}
 	# vscsi goes first, some fields are not available -> "-"
 	foreach my $vhost (sort device_numerically keys %vscsi) {
@@ -527,20 +554,22 @@ if ( $options{'disks'} ) {
 			$vscsi{$vhost}->{'lpar_name'},
 			"-",
 			"-",
+			"-",
 			"-"
 		);
 	}
 	foreach my $vhost (sort device_numerically keys %vfc) {
-		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %14s\n",
+		printf("%-9s %-9s %-4s %-5s %-16s %6s %-10s %-5s %-5s %-16s %14s\n",
 			$vfc{$vhost}->{'name'},
 			$vfc{$vhost}->{'status'},
 			$vfc{$vhost}->{'slot'},
-			$vfc{$vhost}->{'vio_adapter'},
+			$vfc{$vhost}->{'vio_adapter'} || "-",
 			$adapters{$vfc{$vhost}->{'vio_adapter'}}->{'wwpn'} // "-",
 			$vfc{$vhost}->{'lpar_number'},
-			$vfc{$vhost}->{'lpar_name'} // "-",
-			$vfc{$vhost}->{'lpar_adapter'} // "-",
+			$vfc{$vhost}->{'lpar_name'} || "-",
+			$vfc{$vhost}->{'lpar_adapter'} || "-",
 			$vfc{$vhost}->{'lpar_slot'} // "-",
+			$wwpns{$vfc{$vhost}->{'lpar_name'}}->{$vfc{$vhost}->{'lpar_adapter'}} // "-",
 			$vfc{$vhost}->{'san_status'}
 		);
 	
