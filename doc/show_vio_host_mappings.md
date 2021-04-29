@@ -38,14 +38,14 @@ vfchost15 Available C16  fcs2  100000109B1DC5EF      9 aixlpar08   fcs2  C16   C
 vfchost24 Available C23  -     -                    11 -           -     -     -                 NOT_LOGGED_IN
 vfchost25 Available C22  fcs2  100000109B1DC5EF     11 aixlpar09   fcs2  C16   C0507604F7C300E7      LOGGED_IN
 ```
-In this example one WWPN of LPAR 11 (aixlpar09) is not zoned correctly... or the mapping is not correctly configured.
+In this example vhost24 connected to LPAR 11 (aixlpar09) has a broken mapping.
 
 Columns:
 | Name | Purpose |
 | ---      |  ------  |
 | ADAPTER | Name of the virtual host adapter on the VIOS server|
 | STATE | Virtual host adapter state, can be Available or Defined |
-| SLOT | Physical adapter slot of the corresponding fibrechannel adapter, show complete path with lscfg -vl <adapter> |
+| SLOT | Adapter slot of the virtual host adapter as configured in the HMC profile |
 | HBA | Name of the physical adapter the virtual adapter is attached to |
 | WWPN | World Wide Port Number of the underlying physical fibrechannel adapter |
 | LPARID | LPAR ID of the connected LPAR, see lparstat -i inside the LPAR |
@@ -54,3 +54,5 @@ Columns:
 | VSLOT | Virtual slot number of the virtual LPAR HBA as configured in the HMC profile |
 | LPARWWPN | Active LPAR WWPN, the inactive WWPN is only visible on the HMC! |
 | SAN | State of the virtual adapter |
+
+TODO: Add some example to the -d option
