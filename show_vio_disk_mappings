@@ -17,6 +17,7 @@
 # Version 2.3 2015-04-30 cosmetics: slot numbers left justified
 # Version 2.4 2020-11-07 moved serials and locations into luninfo.cfg
 # Version 2.5 2021-03-17 storage subs, added purestorage, codereview
+# Version 2.6 2021-04-12 added Nimble storage
 #
 # Bugs: Script might display garbage for LPAR and/or LPARID when executed while a lpar is booting
 #       there is no documentation on all possible kdb output :-(
@@ -320,6 +321,31 @@ sub identify_purestorage {
 	return 0; # false
 }
 
+# identify Nimble volumes
+sub identify_nimblevolume {
+	my $disksref = shift;
+	my $d = shift;
+	
+	#         nimblevolume
+	
+	# tested with Nimble box (unknown version). ODM package necessary!
+	# 372024b0c462a17e9aa76c9ce9004c7b937406Server06Nimblefcp
+	# the numbers in front of Server and Nimble seem to be the length of the following string, let's not depend on that 8-)
+	if ( defined $disksref->{$d}->{'unique_id'} and $disksref->{$d}->{'unique_id'}=~ m/....((................)6c9ce(...........))..Server..Nimblefcp/ ) {
+		$disksref->{$d}->{'box'}=$3;
+		$disksref->{$d}->{'uuid'}="$1";
+		$disksref->{$d}->{'suid'}="$2";
+		$disksref->{$d}->{'box_type'}="NIMB";
+		if ( defined $disksref->{$d}->{'lun_id'} ) {
+			if ( $disksref->{$d}->{'lun_id'} =~ m/0x(?:([\da-f]+)0{12}|0)\b/ ) { # either 0 or value without 12 zeros
+				$disksref->{$d}->{'scsi_id'}= defined $1 ? hex($1):0;
+			}
+		}
+		return 1; # true
+	}
+	return 0; # false
+}
+
 # copy & paste from luninfo, few lines removed (like lun_id and scsi_id stuff)
 foreach my $disk ( keys %disks ) {
 	#open(CMD,"/usr/sbin/lsattr -El $disk|") or die "Error running /usr/sbin/lsattr -El $disk !\n";
@@ -354,15 +380,21 @@ foreach my $disk ( keys %disks ) {
 			identify_purestorage(\%disks, $disk);
 
 		}
+		elsif (/nimblevolume/) {
+			identify_nimblevolume(\%disks, $disk);
+		}
+
 		elsif (/vdisk/) {
 			identify_2145(\%disks, $disk) or
 			identify_purestorage(\%disks, $disk) or
+			identify_nimblevolume(\%disks, $disk) or
 			identify_2107(\%disks, $disk);
 
 		}
 		elsif (/mpioosdisk/) { # generic AIX MPIO
 			identify_2145(\%disks, $disk) or
 			identify_purestorage(\%disks, $disk) or
+			identify_nimblevolume(\%disks, $disk) or
 			identify_2107(\%disks, $disk);
 
 		}
@@ -371,6 +403,10 @@ foreach my $disk ( keys %disks ) {
 
 		}
 		elsif (/scsd/) { # parallel or serial SCSI disk (subclass would be scsi and sas)
+			delete $disks{$disk}; # we are not interested in those -> remove from hash
+		}
+		elsif (/osdisk/) { # generic disk without ODM package or driver
+			print STDERR "Generic $disks{$disk}->{'type'} for disk $disk is not supported! Please install MPIO ODM or driver!\n";
 			delete $disks{$disk}; # we are not interested in those -> remove from hash
 		}
 		elsif (/sisarray/) { # SAS RAID arrays
