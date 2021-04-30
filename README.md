@@ -12,7 +12,7 @@ It is quite hard to collect all the necessary information to configure and debug
 - [show_vio_host_mappings](doc/show_vio_host_mappings.md)
   - shows the virtual fibrechannel adapter mappings (NPIV) on VIOS servers
 
-- [show_vio_disk_mappings](doc/show_vio_disk_mappings)
+- [show_vio_disk_mappings](doc/show_vio_disk_mappings.md)
   - shows the virtual scsi disk mappings on VIOS servers (only raw disk mappings, no LVM or Storage pool luns)
   - can show the datacenter location of each disk when configured in luninfo.cfg 
   - supports the same storage boxes as luninfo
