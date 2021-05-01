@@ -13,10 +13,12 @@ AIX 5.3, 6.1, 7.1 and 7.2 are supported, VIOS 2.x and 3.x are known to work. Cur
 
 Currently supported storage boxes:
 - DS 8000 (2107)
-- SVC (2145), with and without SDDPCM, 2147 will probably also work with minimum code adjustments, just change the number
-- Hitachi (htcvspgx00mpio, only with installed ODM fileset devices.fcp.disk.Hitachi.array.mpio.rte)
-- Purestorage Flasharray (puredisk, only with installed ODM fileset devices.fcp.disk.pure.flasharray.mpio.rte)
-- Nimble Storage (nimblevolume, only with installed ODM fileset devices.disk.NimbleStorageMPIO.rte)
+- SVC (2145), with and without SDDPCM, 2147 will probably also work with minimum code adjustments, just change the number in the source code
+- Hitachi (htcvspgx00mpio, **only** with installed ODM fileset **devices.fcp.disk.Hitachi.array.mpio.rte**)
+- Purestorage Flasharray (puredisk, **only** with installed ODM fileset **devices.fcp.disk.pure.flasharray.mpio.rte**)
+- Nimble Storage (nimblevolume, **only** with installed ODM fileset **devices.disk.NimbleStorageMPIO.rte**)
+
+More boxes can be added. Please supply information and I'll try my very best :-)
 
 Following types of attachments are tested (not all combinations):
 - direct attachment to physical or virtual NPIV fibrechannel adapter
@@ -24,7 +26,7 @@ Following types of attachments are tested (not all combinations):
 - disk multipathing with and without SDDPCM, IBM boxes only
 - generic AIX MPIO (mpioosdisk)
 
-Fibrechannel adapter detection is limited, even though generic, it's possible, that your adapter might not be recognized.
+Fibrechannel adapter detection is limited, even though generic, it's possible, that your adapter might not be recognized. Please create an issue!
 
 ## Table of Contents
 - [Syntax](#syntax)
