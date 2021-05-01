@@ -68,7 +68,7 @@ With -H the header line will not be displayed.
 
 Only SAN disks are shown. Locally attached SAS or SCSI disks, DVD drives etc. are ignored. When the script finds a disk device which is unknown, it will print "Unknown/unsupported disk type \<name of the storage type\> for disk \<hdisk name\> found!" In these cases add an identification subroutine or create an issue.
 
-The disk location information (LOC) is derived from the bos serial from disk UUID and the name is configured in luninfo.cfg (see below)
+The disk location information (LOC) is derived from the box serial from disk UUID and the name is configured in luninfo.cfg (see below)
 
 Example outputs:
 ```
