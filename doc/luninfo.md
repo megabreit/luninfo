@@ -30,8 +30,8 @@ Fibrechannel adapter detection is limited, even though generic, it's possible, t
 
 ## Table of Contents
 - [Syntax](#syntax)
-- [Disk summary](#show-disk-summary)
-- [Fibrechannel adapter details](#show-fibrechannel-hba-detail)
+- [Show disk summary](#show-disk-summary)
+- [Show fibrechannel hba details](#show-fibrechannel-hba-details)
 - [Show disk details](#show-disk-details)
 - [Show paths and priorities](#show-paths-and-priorities)
 - [Show virtual adapter details and VIOS adapter mappings](#show-virtual-adapter-details-and-vios-adapter-mappings)
@@ -109,8 +109,8 @@ hdisk15  133169152 DC1      9004c7abc71        9004c7abc7124b0c462a17e9aa7 24b0c
 ```
 |Column name | Description |
 | --- | --- |
-| DISK | name of the LUN |
-| SIZE | size in MiB, with -g in GiB |
+| DISK | Name of the LUN |
+| SIZE | Size in MiB, with -g in GiB |
 | LOC | Location name of this LUN, see luninfo.cfg |
 | BOX | Serial number of the box where this LUN is located on |
 | UUID | Complete UUID of the LUN, when there is no real UUID (like with Hitachi or DS8000), then one is generated as "box serial number" + "_" + UID |
@@ -129,7 +129,7 @@ When luninfo.cfg is configured correctly, the luninfo LOC column can be used to 
 luninfo -H | awk '^/rootvg/ {print $3}'|xargs -n 1 chpv -M
 ```
 
-## Show fibrechannel hba detail
+## Show fibrechannel hba details
 
 Shows a summary with fibrechannel hba related information. Command line option is -f.
 
@@ -184,6 +184,10 @@ fcs3  Available NORMAL switch UNKN     8 U8408.44E.1234568-V10-C17-T1 VIRT VIRT 
 Firmware, FRU, PN and FC are not visible from inside of an LPAR, "VIRT" is shown in this case.
 
 ## Show disk details
+
+Shows detailed disk and disk attribute information. The command line option is -d.
+
+With -H the header line will not be displayed.
 ```
 luninfo -d
 #DISK      QD  WR PATHS PSTATE ALGORITHM         RESERVE      HCHECK_C      HCHECK_I  HCHECK_M  PR_KEY_V
@@ -191,52 +195,88 @@ hdisk2     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60  
 hdisk3     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 hdisk4     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 hdisk5     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk6     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk7     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk8     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk9     20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk10    20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk11    20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk12    20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk13    20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 
 luninfo -dl
 #DISK      QD QDK  WR PATHS PSTATE ALGORITHM         RESERVE      HCHECK_C      HCHECK_I  HCHECK_M  PR_KEY_V
-hdisk2     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
+hdisk2     20  60  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 hdisk3     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 hdisk4     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 hdisk5     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk6     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk7     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk8     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk9     20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk10    20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk11    20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk12    20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
-hdisk13    20  20  30  4/4  OK     shortest_queue    no_reserve   test_unit_rdy 60        nonactive none    
 ```
 |Column name | Description |
 | --- | --- |
+| DISK | Name of the LUN |
+| QD | Queue depth of the disk as configured in the ODM|
+| QDK | Queue depth of the disk in the kernel, this may differ from QD! |
+| WR | Read write timeout of the LUN |
+| PATHS | Number of working paths / Number of configured paths to the LUN |
+| PSTATE |  OK if number of working paths is equal to configured paths, otherwise NOT_OK |
+| ALGORITHM | Load balancing algorithm of the LUN |
+| RESERVE | Reserve policy of the LUN, does *NOT* show an actual SCSI reservation |
+| HCHECK_C | Disk setting "hcheck_cmd" |
+| HCKECK_I | Disk setting "hcheck_interval" |
+| HCKECK_M | Disk setting "hcheck_mode" |
+| PR_KEY_V | Disk setting "PR_key_value" |
 
 ## Show paths and priorities
+
+Shows all paths and priorities of a device. Command line option is -p.
+
+This option can be useful to find information about actively used paths for ALUA devices or with SDDPCM as reported with lspath. It's not useful for round robin and similar balancing policies.
+
+With -H the header line will not be displayed.
+
+```
+luninfo -p 
+#DISK     ADAPTER  STATE    MODE       PRIO  SELECT     ERRORS
+hdisk2    fscsi0   Enabled  Available  1     -          -
+hdisk2    fscsi0   Enabled  Available  1     -          -
+hdisk2    fscsi1   Enabled  Available  1     -          -
+hdisk2    fscsi1   Enabled  Available  1     -          -
+hdisk3    fscsi0   Enabled  Available  1     -          -
+hdisk3    fscsi0   Enabled  Available  1     -          -
+hdisk3    fscsi1   Enabled  Available  1     -          -
+hdisk3    fscsi1   Enabled  Available  1     -          -
+```
 
 |Column name | Description |
 | --- | --- |
 
 ## Show virtual adapter details and VIOS adapter mappings
+
+Shows state of virtual fibrechannel and SCSI adapters, slots, atrributes and mappings. Command line option is -v.
+
+LPARs can have both adapter types at the same time. Live migrating LUNs from one adapter type to the other does *not* work!
+
+With -H the header line will not be displayed.
 ```
 luninfo -v
 #HBA    STATE     HW_PATH                        SLOT VIOS       VHOST      ERR_RECOV    PATH_TO
-fcs0    Available U8408.44E.1234568-V10-C14-T1   C14  aixvios1   vfchost6   fast_fail    -      
-fcs1    Available U8408.44E.1234568-V10-C15-T1   C15  aixvios1   vfchost7   fast_fail    -      
-fcs2    Available U8408.44E.1234568-V10-C16-T1   C16  aixvios2   vfchost6   fast_fail    -      
-fcs3    Available U8408.44E.1234568-V10-C17-T1   C17  aixvios2   vfchost7   fast_fail    -      
+fcs0    Available U8408.44E.1234568-V10-C14-T1   C14  aixvios1   vfchost6   fast_fail    -
+fcs1    Available U8408.44E.1234568-V10-C15-T1   C15  aixvios1   vfchost7   fast_fail    -
+fcs2    Available U8408.44E.1234568-V10-C16-T1   C16  aixvios2   vfchost6   fast_fail    -
+fcs3    Available U8408.44E.1234568-V10-C17-T1   C17  aixvios2   vfchost7   fast_fail    -
+vscsi0  Available U8408.44E.1234568-V10-C18-T1   C18  aixvios1   vhost0     fast_fail    30
+vscsi1  Available U8408.44E.1234568-V10-C19-T1   C19  aixvios1   vhost1     fast_fail    30
 ```
 |Column name | Description |
 | --- | --- |
+| HBA | Name of virtual HBA adapter |
+| STATE | AIX adapter state, either Available or Defined |
+| HW_PATH | Hardware path of the virtual adapter |
+| SLOT | Slot number as configured in the HMC profile |
+| VIOS | Name of the VIOS server the virtual adapter is mapped to |
+| VHOST | Name of the mapped virtual host adapter on the VIOS server |
+| ERR_RECOV | Adapter option "vscsi_err_recov" for vscsi adapters and "fc_err_recov" for fc adapters |
+| PATH_TO | Adapter option "path_to", exists only for vscsi adapters, otherwise "-" |
 
 ## Show managed system information
 
+Shows managed system information like model name, system serial, firmware version and managed system name. Command line option is -m.
+
+The option -l adds temporary and permanent firmware version and location info from luninfo.cfg.
+
+With -H the header line will not be displayed.
 ```
 luninfo -m
 #MODELNAME      SYSTEMID   FIRMWARE   MSYSNAME  
@@ -249,7 +289,70 @@ luninfo -ml
 
 |Column name | Description |
 | --- | --- |
+| MODELNAME | Model and system type |
+| SYSTEMID | System serial number |
+| FIRMWARE | Currently active managed system firmware |
+| FIRMWARE(t) | Current temporary system firmware |
+| FIRMWARE(p) | Current primary system firmware |
+| MSYSNAME | Managed system name as configured in luninfo.cfg |
+| LOCATION | Managed system datacenter location as configured in luninfo.cfg |
+| RACK | Managed system rack coordinates as configured in luninfo.cfg |
+
 
 ## Show known datacenter locations and serial numbers
 
+Shows a human readable dump of the luninfo.cfg contents.
+
+Example, corresponding to the XML file below:
+```
+luninfo -L
+DC DC1 comment Datacenter 1
+ storage box 12345 comment IBM SVC
+ storage box FFFF comment Hitachi G200
+ storage box 9004c7abc71 comment Nimble storage
+ managed system p812dc1 serial 1234567 rack A0 comment NIM server
+ managed system p850dc1 serial 1234568 rack A1 comment prod server
+
+DC DC2 comment Datacenter 2
+ storage box 12346 comment IBM SVC
+ storage box FFAA comment Hitachi G200
+ storage box 8A5000CD6D99406F comment PureStorage Flasharray
+ managed system p812dc2 serial 1234569 rack B7 comment second NIM server
+ managed system p850dc2 serial 123456A rack B8 comment second prod server 
+```
+The value of DC will appear in the output of the disk summary and managed system info.
+
 ## config file layout and example configuration
+
+luninfo.cfg is a custom XML file. Why XML? It's the only helpful module that was avaliable in the default perl package on AIX. Sorry for the inconvenience :-)
+
+One *config* block consists of one or more *location* blocks. Each *location* block can contain several *storage* and *ms* blocks.
+
+*location* has *name* and *comment* values. *name* is mandatory and will be used as output in the LOC column.
+
+*storage* has *name* and *comment* values. *name* is mandatory and contains the **case sensitive** storage box serial.
+
+*ms* has *name*, *ms-name*, *rack* and *comment* values. *name* is mandatory and contains the managed system serial number. To be consistent, *ms-name* should match the name of the managed system in the HMC.
+
+There are no shell comments (like #) allowed. Please use the comment fields!
+
+**Beware**: Identical name values (=serial numbers), regardless of the location, will cause problems. The first appearance is used and a warning is shown. Please cleanup! When this is really an issue, please open an issue and explain.
+
+```
+<config>
+<location name="DC1" comment="Datacenter 1">
+ <storage name="12345" comment="IBM SVC"></storage>
+ <storage name="FFFF" comment="Hitachi G200"></storage>
+ <storage name="9004c7abc71" comment="Nimble storage"></storage>
+ <ms name="1234567" ms-name="p812dc1" rack="A0" comment="NIM server"></ms>
+ <ms name="1234568" ms-name="p850dc1" rack="A1" comment="prod server"></ms>
+</location>
+ <location name="DC2" comment="Data Center 2">
+ <storage name="12346" comment="IBM SVC"></storage>
+ <storage name="FFAA" comment="Hitachi G200"></storage>
+ <storage name="8A5000CD6D99406F" comment="PureStorage Flasharray"></storage>
+ <ms name="1234569" ms-name="p812dc2" rack="B7" comment=""></ms>
+ <ms name="123456A" ms-name="p850dc2" rack="B8" comment=""></ms>
+</location>
+</config>
+```
