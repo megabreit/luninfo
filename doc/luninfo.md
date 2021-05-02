@@ -241,6 +241,13 @@ hdisk3    fscsi1   Enabled  Available  1     -          -
 
 |Column name | Description |
 | --- | --- |
+| DISK | Name of the LUN |
+| ADAPTER | Adapter which is used for this path |
+| STATE | Path state, Enabled or Disabled |
+| MODE | Path mode |
+| PRIO | Path priority, always 1 with round robin or load balance |
+| SELECT | Select attribute from SDDPCM, otherwise "-" |
+| ERRORS | Error attribute from SDDPCM, otherwise "-" |
 
 ## Show virtual adapter details and VIOS adapter mappings
 
